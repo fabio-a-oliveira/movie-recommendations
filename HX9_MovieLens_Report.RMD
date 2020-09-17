@@ -1,0 +1,5053 @@
+---
+title: "HX9_MovieLens"
+author: "Fabio A Oliveira"
+date: "24/08/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE, include = TRUE, toc = TRUE)
+```
+
+```{r install and load libraries download and read data}
+
+# Install and load libraries
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(Matrix)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+if(!require(matrixStats)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(lubridate)
+library(knitr)
+library(Matrix)
+library(matrixStats)
+
+```
+
+```{r download and read MovieLens dataset}
+
+# Download MovieLens dataset
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Remove temporary objects
+rm(movies,ratings,dl)
+```
+
+```{r create training and validation datasets}
+
+# Create development and validation datasets
+
+suppressWarnings(set.seed(1, sample.kind="Rounding"))
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+# Remove temporary variables
+
+rm(test_index, temp, movielens, removed)
+
+```
+
+# Introduction/overview/executive summary
+
+section that describes the dataset and summarizes the goal of the project and key steps that were performed
+
+# Methods/analysis
+
+section that explains the process and techniques used, including data cleaning, data exploration and visualization, insights gained, and your modeling approach
+
+EDA is only exploration, not modeling. Will provide clues for what aspects can be included in the model. Because we're only exploring, for some of the analysis we'll not use the entire dataset, to make it faster and more memory efficient.
+
+PENSAR SE VALE À PENA TRATAR DO PONTO ABAIXO
+
+There are 3 different versions of the problem:
+* validation set includes new users
+* validation set includes new movies
+* validation set includes new observations: user/movie combinations
+
+Why are they different???
+
+This report addresses version X
+
+```{r comparison of edx and validation sets}
+
+mean(unique(edx$userId) %in% unique(validation$userId))
+mean(unique(validation$userId) %in% unique(edx$userId))
+mean(unique(edx$movieId) %in% unique(validation$movieId))
+mean(unique(validation$movieId) %in% unique(edx$movieId))
+
+```
+
+
+
+## Data preparation
+
+Adjustments necessary to the original edx data frame:
+
+1. The edx object generated via the provided code has the movie title and release year in a single string. We begin by separating the title and year into different variables.
+2. We also convert the 'timestamp' variable into a readable format, with a 'date' and a 'time' columns.
+3. We convert the genres variable, which contains a list of different genres for each movie separated by a '|', into individual columns with a logical value for each genre, indicating whether or not the movie belongs to that individual  
+
+```{r initial data preparation}
+
+# split movie title and year, convert timestamp to date
+edx <- 
+  edx %>% 
+  mutate(year = as.integer(str_extract(title,'(?<=\\()\\d{4}(?=\\))')),
+         title = str_replace(title,'\\s\\(\\d{4}\\)$',''),
+         date = as_date(as_datetime(timestamp)),
+         time = hms::as_hms(as_datetime(timestamp))) %>% 
+  select(-timestamp)
+
+edx %>% glimpse
+
+```
+
+```{r initialize movies object}
+
+# initialize movies object, with individual information for each movie
+movies <-
+  edx %>% 
+  select(movieId,title,year,genres) %>% 
+  arrange(movieId) %>% 
+  group_by(movieId,title,year,genres) %>% 
+  summarise()
+
+```
+
+```{r initialize users object}
+
+# initialize users object, with individual information for each user
+users <- 
+  edx %>% 
+  select(userId) %>% 
+  group_by(userId) %>% 
+  summarise %>% 
+  arrange(userId)
+
+users
+
+# criar colunas para avaliação média e para número de avaliações, serão usados depois para filtros etc
+
+
+```
+
+```{r create genres & genres.wide objects}
+
+# get maximum number of genres for a single movie (1 + number of separators)
+max_genres <- 
+  edx %>% 
+  summarize(n_genres = 1 + max(str_count(genres, "\\|"))) %>% 
+  as.integer()
+
+# split genres into columns and then gather into long format
+genres.long <-
+  edx %>%
+  select(movieId,title,genres) %>%
+  separate(col = genres,
+           into = paste("genre ",1:max_genres),
+           sep = "\\|",
+           fill = "right") %>%
+  pivot_longer(cols = c(-movieId,-title),
+               names_to = "genre #",
+               values_to = "genre",
+               values_drop_na = TRUE) %>%
+  select(-`genre #`) %>%
+  group_by(movieId,title,genre) %>% 
+  summarize(.groups = 'drop')
+
+# create genres_wide object
+genres.wide <-
+  genres.long %>% 
+  select(-title) %>% 
+  mutate(true = TRUE) %>% 
+  pivot_wider(names_from = genre,
+              values_from = true,
+              values_fill = FALSE)
+
+genres <- list(long = genres.long,
+               wide = genres.wide)
+
+# remove temporary object
+rm(max_genres)
+rm(genres.long, genres.wide)
+
+
+```
+
+## Exploratory Data Analysis
+
+Before we tackle the prediction problem, we begin by doing a thorough exploratory data analysis, with the goal of identifying trends and features of the data that might be useful in understanding it and possibly in constructing a prediction algorithm.
+
+Five aspects will be explored in details in this section:
+
+1. Individual users
+2. Individual movies
+3. Movie genres
+4. Date and time
+5. Number of ratings (avaliar como afeta todas as variáveis anteriores)
+
+In the EDA section, we will not necessarily investigate possible confounding factors, only trends that may be explored in detail during modeling.
+
+
+* how many users account for 90% of the ratings? can the other users be modelled according to the top users? use movie ratings and favorite movies to find relationships between users
+* how many movies account for 90% of the ratings? can the other movies be modelled according to the top movies? use ratings for each user profile and also use genres to find related movies
+
+### Distribution of ratings
+
+```{r TEMPORARY - calculate and plot distribution of ratings}
+
+# 
+# mode <- function(x){
+#   index <- which.max(table(x))
+#   mode <- names(table(x))[index]
+#   as.numeric(mode)
+# }
+# 
+# 
+# edx %>% 
+#   ggplot(aes(x = rating)) +
+#   geom_histogram()
+# 
+# edx %>% 
+#   group_by(movieId) %>% 
+#   summarize(avg = round(mean(rating),1)) %>% 
+#   group_by(avg) %>% 
+#   summarize(count = n()) %>% 
+#   ggplot(aes(x = avg, y = count)) +
+#   geom_point() +
+#   geom_smooth()
+# 
+# mode_rating <- 
+#   edx %>% 
+#   left_join(movie_averages, by = "movieId") %>% 
+#   mutate(`average rating` = round(`average rating`,1)) %>% 
+#   group_by(`average rating`) %>% 
+#   summarize(mode = mode(rating))
+# 
+# mode_rating %>% 
+#   ggplot(aes(x = `average rating`, y = mode)) +
+#   geom_line()
+# 
+# # as.numeric(names(table(rating))[which.max(table(rating))])
+
+```
+
+
+
+### Analysis of individual user's behavior
+* analysis of individual user's behavior - vs genres, franchises, day of the week, time of release
+* construction of a user profile (create new data frame)
+* how can users be grouped?
+* how do users rate each genre?
+* how do users rate each cluster/pc of movies?
+
+The number of distinct users in the dataset is given below:
+
+```{r number of unique users}
+
+users %>% 
+  pull(userId) %>% 
+  n_distinct
+
+```
+
+How often do they rate?
+
+```{r number of ratings per user}
+
+edx %>% 
+  select(userId,rating) %>% 
+  group_by(userId) %>% 
+  summarise("# of ratings" = n(),
+            .groups = 'drop') %>% 
+  ggplot(aes(x = `# of ratings`)) +
+  geom_histogram(binwidth = 100, boundary = 50, colour = 'gray') +
+  scale_x_continuous(breaks = seq(0,7000,1000), minor_breaks = seq(0,7000,200)) +
+  scale_y_continuous(trans = 'sqrt') +
+  coord_cartesian(xlim = c(0,6500)) +
+  labs(title = "Histogram of # of ratings per user",
+       x = "# of ratings",
+       y = "# of users")
+
+```
+We see that many users in the dataset have rated hundreds of movies, with a few rating upwards of a thousand. In fact, we can see that in the quantiles below:
+
+```{r summary statistics for # of ratings per user}
+
+edx %>% 
+  select(userId,rating) %>% 
+  group_by(userId) %>% 
+  summarise("# of ratings" = n(),
+            .groups = 'drop') %>% 
+  select(`# of ratings per user` = `# of ratings`) %>% 
+  summary()
+
+```
+
+```{r cumulative ratings per user}
+
+edx %>% 
+  group_by(userId) %>% 
+  summarize("# of ratings" = n(),
+            .groups = 'drop') %>% 
+  arrange(desc(`# of ratings`)) %>% 
+  mutate(unity = 1,
+         "# of users" = cumsum(unity),
+         "cumulative proportion" = cumsum(`# of ratings`) / nrow(edx)) %>% 
+  select(`# of users`, `# of ratings`, `cumulative proportion`) %>% 
+  ggplot(aes(x = `# of users`,
+             y = `cumulative proportion`)) +
+  geom_line() +
+  labs(title = "Cumulative proportion of total ratings per number of users")
+
+```
+
+We now look at how users behave on average.
+
+```{r TEMPORARY - mean ratings for users and overall}
+
+# # calculate overall mean rating
+# overall_mean <-
+#   edx %>% 
+#   pull(rating) %>% 
+#   mean
+# 
+# # calculate mean rating for average movie
+# avg_movie_mean <- 
+#   edx %>% 
+#   select(movieId,rating) %>% 
+#   group_by(movieId) %>% 
+#   summarize(rating = mean(rating),
+#             .groups = 'drop') %>% 
+#   pull(rating) %>% 
+#   mean()
+# 
+# # calculate the average rating for each user
+# user_stats <-
+#   edx %>% 
+#   select(userId, rating) %>% 
+#   group_by(userId) %>% 
+#   summarize("# of ratings" = n(),
+#             "mean rating" = mean(rating),
+#             "sd rating" = sd(rating),
+#             .groups = 'drop')
+# 
+# # calculate mean rating for average user
+# avg_user_mean <-
+#   user_stats %>% 
+#   pull(`mean rating`) %>% 
+#   mean
+# 
+# # summary statistics
+# user_stats %>% 
+#   pull(`mean rating`) %>% 
+#   summary
+
+```
+
+
+
+Plot de todos os users, com error bar e média, ordenados por média
+
+
+
+
+
+
+
+
+
+Do more active users tend to rate differently? An interesting phenomenon is visible: even though the overall mean rating is 3.51, the mean rating given by the average user is 3.61. This indicates that users who rate movies more frequently may tend to give lower ratings. In fact, when we calculate the correlation coefficient between the number of ratings for each individual user and their mean ratings, we get do get a negative value:
+
+```{r TEMPORARY - average rating vs # of ratings per user}
+
+# with(user_stats, cor(`# of ratings`,`mean rating`))
+
+```
+A plausible explanation for this negative correlation may be that users who rate more frequently need to lower their bar when choosing what to watch. As if they've already seen all the good movies. This indicates that caution is necessary if the mean rating for each user is going to be used as a predictor, since an user's average rating may be influenced by the fact that the particular user may have been forced to watch lower quality movies simply because of a lack of options. Therefore, the number of ratings per user is probably a confounding factor, as it influences both the average rating given by a particular user and this user's choice of movies.
+
+To further investigate this possibility, we look at how the number of ratings given by each user influence how their rating deviate from the average.
+
+```{r number of ratings as confounding factor}
+
+movies <-
+  edx %>% 
+  select(movieId,rating) %>% 
+  group_by(movieId) %>% 
+  summarize(`average rating (edx set)` = mean(rating),
+            .groups = 'drop') %>% 
+  right_join(movies, by = "movieId") %>% 
+  select(movieId,title,year,genres,`average rating (edx set)`)
+
+edx %>% 
+  select(userId,movieId,rating) %>% 
+  left_join(select(movies,movieId,`average rating (edx set)`), by = 'movieId') %>% 
+  mutate(difference = rating - `average rating (edx set)`) %>% 
+  group_by(userId) %>% 
+  summarize("# of ratings" = n(),
+            "average spread" = mean(difference),
+            .groups = 'drop') %>% 
+  summarize(cor(`# of ratings`,`average spread`))
+
+```
+As expected, the significance of the correlation is reduced when we look at the difference between each particular user's rating and the movie average, instead of the absolute rating. However, the negative correlation is still present, which indicates that users who rate more frequently do tend to give slightly lower ratings.
+
+
+
+
+
+How are users preferences reflected in the movie genres? Do they rate differently according to the genres they rate more often? Is there a Simpson's paradox with the fact that users who rate more frequently have lower average rating?
+
+```{r TEMPORARY - users vs genres}
+
+# # sample random users
+# random_users <-
+#   edx %>% 
+#   pull(userId) %>% 
+#   unique() %>%
+#   sample(size = 1000)
+# 
+# # get average rating each user gives to each genre
+# user_genre_avg <-
+#   edx %>% 
+#   select(-movieId, -title, -year, -date, -time) %>%
+#   filter(userId %in% random_users) %>% 
+#   mutate(across(c(-userId,-rating),function(vec){if_else(vec == TRUE, TRUE, NA)})) %>% 
+#   pivot_longer(cols = c(-userId, -rating),
+#                names_to = "genre",
+#                values_to = "boolean",
+#                values_drop_na = TRUE) %>% 
+#   select(-boolean) %>% 
+#   group_by(userId,genre) %>% 
+#   summarize("avg rating" = mean(rating),
+#             .groups = 'drop') %>% 
+#   pivot_wider(names_from = genre,
+#               values_from = `avg rating`)
+#   
+#   
+#   
+#   left_join(user_stats,
+#             by = 'userId') %>% 
+#   select(-`# of ratings`, -`sd rating`)
+#   
+# 
+# # principal component analysis
+# user_genre_avg %>% 
+#   left_join(user_stats,
+#             by = 'userId') %>% 
+#   select(-`# of ratings`, -`sd rating`)
+#   
+#   
+# prcomp(user_genre_avg)
+# 
+# column_to_rownames(var = "userId")
+
+
+```
+
+
+
+
+### Analysis of individual movies
+* analysis of individual movies
+* construction of movie profiles (create new data frame)
+* combine with genre analysis
+* grouped by genres
+* grouped by users
+
+
+
+```{r cummulative ratings per movies}
+
+edx %>% 
+  group_by(movieId, title) %>% 
+  summarize("# of ratings" = n(),
+            unity = 1,
+            .groups = 'drop') %>% 
+  arrange(desc(`# of ratings`)) %>% 
+  mutate("# of movies" = cumsum(unity),
+         "cumulative ratings" = cumsum(`# of ratings`) / nrow(edx)) %>% 
+  select(movieId, title, `# of movies`, `cumulative ratings`) %>% 
+  ggplot(aes(x = `# of movies`,
+             y = `cumulative ratings`)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(0,10000,1000),
+                     minor_breaks = NULL) +
+  scale_y_continuous(breaks = seq(0,1,.1),
+                     minor_breaks = seq(0,1,.05)) +
+  labs(title = "Cumulative proportion of total ratings per movies")
+
+```
+
+The top 100 movies most often rated account for roughly 20% of all the ratings, with the top 1000 accounting for 67%. This indicates that a selection of most rated movies (instead of the full set of 10676) can be used to aggregate users.
+
+### Analysis of movie genres
+* genre list
+* genre clusters
+* does number of genres affect rating (do they appeal to more people or does the quality dilute? is this aspect captured in the clustering/svd/prcomp?)
+
+We begin by noting that the genre variable is not in a tidy format. A single variable lists all the genres in which a movie fits, and movies with 5+ of such categories are common. 
+
+Let's create a tidy data structure with all the genres for each of the individual movies. The first 30 entries of the data frame are shown below: ALREADY CREATED IN DATA PREPARATION, CHANGE VERB TO LET'S EXPLORE THE OBJECT
+
+```{r print sample of movies with genres}
+# head(genres, 30)
+```
+Let's look at the list of individual genres, as well as how often they appear.  For this, we construct a bar plot of the frequency for each of the movie genres.
+
+```{r TEMPORARY - plot of movie genre frequency}
+
+# number_of_movies <-
+#   genres$movieId %>% 
+#   n_distinct()
+# 
+# genres %>% 
+#   group_by(genre) %>% 
+#   summarise(count = n(),
+#             .groups = 'drop') %>% 
+#   arrange(genre) %>% 
+#   ggplot(aes(x = count/number_of_movies,
+#              y = reorder(genre,count))) +
+#   geom_col() +
+#   scale_x_continuous(labels = scales::percent) +
+#   labs(title = "Percentage of movies under each genre",
+#        x = "Percentage of movies",
+#        y = "Movie genre")
+
+```
+
+We see that there are `r dplyr::n_distinct(genres$genre)` distinct movie genres which can be attributed non-exclusively to each movie. The most commonly used labels are 'Drama' and 'Comedy', which apply to around 50% and 35% of all movies, respectively.
+
+It is also relevant to check whether every genre has enough individual movies to ensure that no extreme values are consequence of small sample sizes. The table below indicates the total number of movies classified under each of these genres.
+
+```{r TEMPORARY - number of movies under each genre}
+
+# genres %>% 
+#   group_by(genre) %>% 
+#   summarise(count = n(),
+#             .groups = 'drop') %>% 
+#   arrange(desc(count)) 
+
+```
+
+We see that, apart from the 'IMAX' genre with 29 single movies, every other genre has at least a hundred individual movies. As we progress, the need for value regularization must be evaluated in order to ensure that the 'IMAX' genre does not introduce extreme values due a small sample size.
+
+We can also look at how these proportions evolve over time.
+
+```{r TEMPORARY - evolution of movie genres over time}
+# # year of release for each movie
+# year_of_release <-
+#   edx %>% 
+#   select(movieId,year) %>% 
+#   group_by(movieId) %>%
+#   summarize(year = first(year),
+#             .groups = 'drop')
+# 
+# # total new movies per year
+# movies_per_year <-
+#   year_of_release %>% 
+#   group_by(year) %>% 
+#   summarize('total' = n(),
+#             .groups = 'drop')
+# 
+# # new movies per year for each genre
+# genres %>% 
+#   left_join(year_of_release, by = 'movieId') %>% 
+#   group_by(year,genre) %>%
+#   summarize('# of movies' = n(),
+#             .groups = 'drop') %>% 
+#   left_join(movies_per_year, by = 'year') %>% 
+#   mutate(proportion = `# of movies` / total) %>% 
+#   ggplot(aes(x = year,
+#              y = proportion)) +
+#   geom_line(position = 'stack') +
+#   facet_wrap(genre ~ .) +
+#   theme(axis.text.x = element_text(angle=90))
+  
+```
+
+Are the genres correlated? In order to investigate this, we construct a matrix with columns indicating whether each of the genres is applicable to each of the movies. A random sample of this matrix is shown below: ALREADY CREATED IN DATA PREPARATION, CHANGE TO LET'S EXPLORE
+
+```{r genres for each movie}
+
+# genres_wide %>% 
+#   sample_n(10)
+```
+
+The table below shows, for each genre, the ones that correlate the most and the least with it.
+
+```{r correlation between genres}
+# genres_wide %>% 
+#   select(-movieId) %>% 
+#   cor() %>% 
+#   as.data.frame() %>% 
+#   rownames_to_column(var = 'genre') %>% 
+#   pivot_longer(cols = -genre,
+#                names_to = 'correlates to',
+#                values_to = 'correlation') %>% 
+#   filter(genre != `correlates to`) %>% 
+#   group_by(genre) %>% 
+#   summarize('correlates positively with' = `correlates to`[which.max(correlation)],
+#             'max correlation' = max(correlation),
+#             'correlates negatively with' = `correlates to`[which.min(correlation)],
+#             'min correlation' = min(correlation),
+#             .groups = 'drop')
+
+```
+
+We can see that typical values are not very high. Some pairs do stand out, such as the strongest positive correlations observed between 'Action' and 'Adventure' (29%), 'Animation' and 'Children' (46%), and 'Crime' and 'Thriller' (26%), as well as the negative correlation between 'Comedy' and 'Drama' (-30%).
+
+This lack of a strong correlation between movie genres indicate that, if we choose to use genres as predictors for movie ratings, there probably isn't much room for complexity reduction by applying matrix factorization or clustering techniques to the genres matrix. We may need to use the full set of 19 variables (corresponding to each of the different genres that may be attributed to a particular movie) as predictors.
+
+In order to further investigate this aspect, we perform a principal component analysis of the matrix containing the genres applicable to each movie.
+
+```{r principal component analysis}
+
+# genres_wide %>% 
+#   select(-movieId) %>% 
+#   prcomp() %>% 
+#   summary()
+
+```
+As hinted by the inspection of the correlation coefficients between the different genres, the principal component analysis indicates that 13 components are necessary in order to account for 90% of the total variability.
+
+Do genres influence ratings? The following table shows average rating for movies categorized with each of the different genres in descending order. The red vertical line represents the overall mean rating across all movies.
+
+```{r genres vs ratings}
+
+# # calculate overall mean rating
+# overall_mean <- 
+#   edx %>% 
+#   select(movieId,rating) %>% 
+#   group_by(movieId) %>% 
+#   summarize(rating = mean(rating),
+#             .groups = 'drop') %>% 
+#   pull(rating) %>% 
+#   mean()
+# 
+# # plot mean rating for each of the genres
+# edx %>% 
+#   select(movieId,rating) %>% 
+#   group_by(movieId) %>% 
+#   summarize(rating = mean(rating),
+#             .groups = 'drop') %>% 
+#   right_join(genres, by = 'movieId') %>% 
+#   group_by(genre) %>% 
+#   summarize('# of movies' = n(),
+#             'mean rating' = mean(rating),
+#             .groups = 'drop') %>% 
+#   arrange(desc(`mean rating`)) %>% 
+#   ggplot(aes(x = `mean rating`,
+#              y = reorder(genre,`mean rating`))) +
+#   geom_vline(xintercept = overall_mean,
+#              color = 'red', size = 1) +
+#   geom_col(alpha = .7) +
+#   geom_label(aes(label = round(`mean rating`,1)),
+#              size = 3,
+#              nudge_x = .2) +
+#   scale_x_continuous(limits = c(0,5)) +
+#   labs(title = "Average movie rating across different genres",
+#        x = "Mean rating",
+#        y = "Movie genres")
+
+```
+
+There appears to be a clear trend indicating that certain genres tend to be better rated than others. Additionally, as observed previously, each genre (except for 'IMAX', whose value is rather close to the overall mean) has a number of individual movies large enough to ensure that this trend is not due to random chance. This indicates that, when using movie genres as a predictor for movie rating, no regularization is necessary to account for extreme values deriving from small samples.
+
+Finally, we investigate whether there is a relation between the number of categories attributed to a particular movie and its average rating. The figure below displays average movie rating according to how many genres are in its classification. It also depicts the trend line, obtained via linearization.
+
+```{r number of genres vs rating}
+
+# # plot mean rating according to number of different genres
+# edx %>% 
+#   select(movieId,rating) %>% 
+#   group_by(movieId) %>% 
+#   summarize(rating = mean(rating),
+#             .groups = 'drop') %>% 
+#   right_join(genres, by = 'movieId') %>% 
+#   group_by(movieId) %>% 
+#   summarize('# of genres' = n(),
+#             'mean rating' = mean(rating),
+#             .groups = 'drop') %>% 
+#   group_by(`# of genres`) %>% 
+#   summarize("mean rating" = mean(`mean rating`),
+#             .groups = 'drop') %>% 
+#   arrange(`# of genres`) %>% 
+#   ggplot(aes(y = `mean rating`,
+#              x = `# of genres`)) +
+#   geom_smooth(formula = y ~ x,
+#               method = 'lm',
+#               size = 1, color = 'red', linetype = 'dashed', se = FALSE) +
+#   geom_col(alpha = .5) +
+#   geom_label(aes(y = `mean rating`/2,
+#                  label = round(`mean rating`,2)),
+#              size = 6,
+#              nudge_y = .3) +
+#   scale_y_continuous(limits = c(0,4)) +
+#   scale_x_continuous(breaks = 1:max_genres,
+#                      minor_breaks = NULL) +
+#   labs(title = "Average movie rating per number of movie genres",
+#        y = "Mean rating",
+#        x = "Movie genres")
+
+
+```
+
+There appears to be a significant trend indicating that the more different genres a movie is categorized in, the higher its rating. However, if this aspect is used as a predictor for the movie rating, it is important to consider regularization procedures to take into account the possibility of extreme values being due to small sample sizes. The table below depicts the total number of movies that received each number of different genres.
+
+```{r number of movies vs total movie genres}
+
+# edx %>% 
+#   select(movieId,rating) %>% 
+#   group_by(movieId) %>% 
+#   summarize(rating = mean(rating),
+#             .groups = 'drop') %>% 
+#   right_join(genres, by = 'movieId') %>% 
+#   group_by(movieId) %>% 
+#   summarize('# of genres' = n(),
+#             .groups = 'drop') %>% 
+#   group_by(`# of genres`) %>% 
+#   summarize("# of movies" = n(),
+#             .groups = 'drop') %>% 
+#   arrange(`# of genres`)
+
+```
+
+
+### Analysis of time
+
+* effect of day of the week
+* effect of hour of the day (watch for timezone differences)
+* effect of time since release
+* effect of time of release
+* do movies age differently?
+
+```{r influence of year of release on rating}
+
+edx %>% 
+  # sample_n(1000) %>% 
+  group_by(year) %>% 
+  summarize(average = mean(rating),
+            n = n(),
+            .groups = 'drop') %>% 
+  ggplot(aes(x = year, y = average)) +
+  geom_point() +
+  geom_smooth(method = 'lm', formula = y ~ x)
+
+```
+
+```{r influence of years since release on rating}
+
+edx %>% 
+  # sample_n(1000) %>% 
+  mutate(years_since_release = year(date) - year) %>% 
+  group_by(years_since_release) %>% 
+  summarize(average = mean(rating),
+            n = n(),
+            .groups = 'drop') %>% 
+  ggplot(aes(x = years_since_release, y = average)) +
+  geom_point() +
+  geom_smooth(method = 'lm', formula = y ~ x)
+
+```
+There is a clear positive correlation between the number of years since a movie was released and the average rating received. It seems to indicate that bad movies are less likely to be watched and rated after many years, which fits  the intuition that good movies tend to stand the test of time.
+
+
+```{r influence of years since release for individual movies}
+
+edx %>% 
+  filter(movieId %in% sample(unique(edx$movieId),12)) %>% 
+  mutate(years_since_release = year(date) - year) %>% 
+  group_by(title, movieId, years_since_release) %>% 
+  summarize(average = mean(rating),
+            n = n(),
+            .groups = 'drop') %>% 
+  ggplot(aes(x = years_since_release,
+             y = average)) +
+  geom_point() +
+  geom_smooth(method = 'lm', formula = y ~ x) +
+  facet_wrap(title ~ ., scales = 'free')
+
+```
+
+
+```{r correlation of years since release for individual movies}
+
+edx %>% 
+  filter(movieId %in% sample(unique(edx$movieId),1000)) %>% 
+  mutate(years_since_release = year(date) - year) %>% 
+  group_by(title, movieId, years_since_release) %>% 
+  summarize(average = mean(rating),
+            times = n(),
+            .groups = 'drop') %>% 
+  group_by(title,movieId) %>% 
+  summarize(times = sum(times), 
+            correlation = cor(years_since_release,average),
+            .groups = 'drop') %>% 
+  filter(times > 100)
+
+  
+
+```
+
+
+
+
+
+### Analysis of number of ratings
+
+* effect of number of ratings on average rating
+* effect of movie genre in number of ratings
+* effect of year of release in number of ratings (total and first year)
+
+
+## Modeling
+
+Here's everything we learned from the exploratory data analysis that can be used for modeling ratings:
+
+* Users who rate more frequently tend to give lower ratings
+* this affects that positively
+* this affects that negatively
+* these can be grouped/clustered
+* users behave like this
+
+
+### Partitioning the edx dataset
+
+Now we split edx into a train and a test sets. During the modeling phase, all models will be constructed based on calculations performed on the train set, and the RMSE will then be evaluated on the test set. There will be no interaction with the validation set created at the beginning.
+
+During the partition of the edx object into train and test sets, it is important to ensure that every movie and user contained in the test set is also in the train set, as the models will depend on calculating characteristics specific to each individual user and movie.
+
+```{r create train and test sets from edx object}
+
+# UNDO THIS !!! DO X-VALIDATION INSTEAD
+
+
+index <- createDataPartition(edx$rating,
+                             times = 1,
+                             p = .2,
+                             list = FALSE)
+test <- edx[index,]
+train <- edx[-index,]
+
+keep <-
+  test %>% 
+  semi_join(train, by = "movieId") %>% 
+  semi_join(train, by = "userId")
+
+remove <-
+  anti_join(test,keep,
+            by = c('movieId', 'userId'))
+
+train <- bind_rows(train,remove)
+test <- keep
+
+rm(index,keep,remove)
+
+# mean(train$movieId %in% test$movieId)
+# mean(test$movieId %in% train$movieId)
+# 
+# mean(train$userId %in% test$userId)
+# mean(test$userId %in% train$userId)
+
+glimpse(test)
+glimpse(train)
+
+
+save(edx, file = "edx")
+rm(edx)
+# carregar com load() se necessário
+
+# já estão incorporados em predictions e os dados estão em users e movies - ERRADO, OS TIMESTAMPS NÃO ESTÃO EM OUTRO LUGAR....
+# save(test, file = "test")
+# save(train, file = "train")
+# rm(test,train)
+
+```
+
+### Naive model
+
+We begin by constructing the following model:
+
+$Y = \mu + \epsilon$
+
+where:
+$\mu$ = mean global rating
+$\epsilon$ = random residue
+
+We  calculate the RMSE obtained in the test dataset with this model.
+
+```{r naive mean rating}
+
+# RMSE function
+RMSE <- function(y, y_hat){sqrt(mean((y-y_hat)^2))}
+
+# calculate average rating on the train set
+mu <- data.frame(train = mean(train$rating),
+                 test = mean(test$rating),
+                 edx = mean(edx$rating))
+
+# create predictions object, with predictions for the train and test set
+predictions <- list(train = data.frame(),
+                    test = data.frame())
+
+# calculate predictions on the train and test sets
+predictions$train <- 
+  train %>% 
+  select(userId,movieId,rating) %>% 
+  mutate("naive mean" = rep(mu$train,nrow(train)))
+predictions$test <- 
+  test %>% 
+  select(userId,movieId,rating) %>% 
+  mutate("naive mean" = rep(mu$train,nrow(test)))
+
+# create results object and populate with RMSE calculated on the train and test set
+results <- list(train = data.frame(),
+                test = data.frame())
+
+# calculate results on both the train and test sets
+results$train <- 
+  data.frame(name = "naive mean",
+             RMSE = RMSE(predictions$train$rating,predictions$train$`naive mean`),
+             description = "global mean as prediction for every rating")
+results$test <- 
+  data.frame(name = "naive mean",
+             RMSE = RMSE(predictions$test$rating,predictions$test$`naive mean`),
+             description = "global mean as prediction for every rating")
+
+```
+
+### Simple movie effect
+
+We proceed to include the movie effect in the model, representing the fact that each movie has an inherent quality that makes it be qualified, on average, above or below the global mean. The model with this new parameter is this:
+
+$Y = \mu + e_m + \epsilon$
+
+where:
+$\mu$ = mean global rating
+$e_m$ = movie effect 
+$\epsilon$ = random residue
+
+As a first approach, $e_m$ is modeled as the average points each movie receives above the train set average. Consequently, $\mu+e_m$ is equal to each individual movie average, so this version of the model corresponds to predicting that each movie is rated as the average of previous ratings plus a random term.
+
+```{r simple movie effect}
+
+# calculate average rating for each movie on the train set
+movies <- 
+  train %>% 
+  group_by(movieId) %>% 
+  summarize("movie effect" = mean(rating) - mu$train) %>% 
+  right_join(movies, by = "movieId") %>% 
+  select(movieId, title, year, genres, `average rating (edx set)`, `movie effect`)
+
+# add columns to predictions
+predictions$train <- 
+  predictions$train %>% 
+  left_join(select(movies, movieId, `movie effect`), by = "movieId") %>% 
+  mutate("simple movie effect" = `naive mean` + `movie effect`) %>% 
+  select(-`movie effect`)
+predictions$test <- 
+  predictions$test %>% 
+  left_join(select(movies, movieId, `movie effect`), by = "movieId") %>% 
+  mutate("simple movie effect" = `naive mean` + `movie effect`) %>% 
+  select(-`movie effect`)
+
+# calculate results on both the train and test sets
+results$train <- 
+  results$train %>% 
+  bind_rows(data.frame(name = "simple movie effect",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`simple movie effect`),
+                       description = "+ deviation from overall mean"))
+results$test <- 
+  results$test %>% 
+  bind_rows(data.frame(name = "simple movie effect",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`simple movie effect`),
+                       description = "+ deviation from overall mean"))
+
+```
+
+
+### Regularized movie effect
+ 
+Although the results did improve, the fact that some movies are rated very few times indicates that a prediction based solely on the movie average is not adequate. In these situations, it is normally beneficial to use a prediction that is closer to the global average for movies with few ratings, and converges the the movie average is receives a more substantial number of ratings. A regularization of each movie's mean rating is appropriate to achieve this correction.
+
+The model with the movie effect regularized according to the number of ratings is represented via the equation below:
+
+$Y = \mu + e_m^r + \epsilon$
+
+where:
+$\mu$ = mean global rating
+$e_m^r$ = regularized movie effect 
+$\epsilon$ = random residue
+
+The regularized movie effect corresponding to each individual movie is obtained via a modified version of the average deviation from the global average, according to the equation below:
+
+$$e_m^r(\lambda) = \frac{1}{\lambda+n_i}* \sum_{m=1}^{n_i} (Y_{m,i} - \mu)$$
+This indicates that the movie effect $e_m^r$ depends on an arbitrary parameter $\lambda$, which can be chosen to minimize the residue.
+
+The figure below depicts the residue obtained after calculating the regularized movie effect with different values of lambda, from which we choose the optimal.
+
+SELECIONAR LAMBDA ÓTIMO COM X-VALIDATION OU BOOTSTRAPPING!!!
+
+```{r regularized movie effect}
+
+# find optimal lambda
+lambda <- seq(0,10,.1)
+
+residue <- 
+  sapply(lambda, function(l){
+    reg_movie_effect <-
+      train %>% 
+      select(movieId,rating) %>% 
+      group_by(movieId) %>% 
+      summarize(emr = sum(rating-mu$train) / (l + n()),
+                .groups = 'drop')
+    y_hat <- 
+      test %>% 
+      select(movieId) %>% 
+      left_join(reg_movie_effect, by = "movieId") %>% 
+      mutate(prediction = emr + mu$train) %>% 
+      pull(prediction)
+    RMSE(test$rating,y_hat)
+  })
+
+plot(lambda, residue)
+
+lambda <- lambda[which.min(residue)]
+
+# calculate movie effect with optimal lambda
+
+movies <- 
+  train %>% 
+  group_by(movieId) %>% 
+  summarize("regularized movie effect" = sum(rating - mu$train)/(lambda + n())) %>% 
+  right_join(movies, by = "movieId") %>% 
+  select(movieId, title, year, genres, `average rating (edx set)`, `movie effect`, `regularized movie effect`)
+
+
+# add columns to predictions
+predictions$train <-
+  predictions$train %>% 
+  left_join(select(movies, movieId, `regularized movie effect`), by = "movieId") %>% 
+  mutate("regularized movie effect" = `naive mean` + `regularized movie effect`)
+predictions$test <-
+  predictions$test %>% 
+  left_join(select(movies, movieId, `regularized movie effect`), by = "movieId") %>% 
+  mutate("regularized movie effect" = `naive mean` + `regularized movie effect`)
+
+# calculate results on both the train and test sets
+results$train <- 
+  results$train %>% 
+  bind_rows(data.frame(name = "regularized movie effect",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`regularized movie effect`),
+                       description = "+ regularized movie effect"))
+results$test <- 
+  results$test %>% 
+  bind_rows(data.frame(name = "regularized movie effect",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`regularized movie effect`),
+                       description = "+ regularized movie effect"))
+
+# remove temp objects
+rm(lambda, residue)
+
+```
+
+The optimal regularization effect parameter $\lambda$ was found to be `r lambda`.
+
+From he RMSE results in the table above, it is evident that regularization has not contributed with a substantial improvement. This may be due to the fact that, as the dataset gets larger, instances of movies with very few ratings become rarer and have a lesser effect on the overall results.
+
+```{r AJUSTAR NOMES DAS VARIÁVEIS plot comparing movie effects with and without regularization}
+
+# em_emr <-
+#   test %>% 
+#   group_by(movieId) %>% 
+#   summarize("# of ratings" = n(),
+#             .groups = 'drop') %>% 
+#   left_join(em, by = "movieId") %>% 
+#   left_join(emr, by = "movieId")
+# 
+#  em_emr %>% 
+#   ggplot(aes(x = em, y = emr, size = `# of ratings`)) +
+#   geom_point(shape = "circle open",
+#              alpha = .1) +
+#   scale_size(trans = 'log10') +
+#   labs(title = "Comparison between movie effect with and w/o regularization",
+#        x = "Movie effect - simple deviation from global mean rating",
+#        y = "Movie effect - regularized to consider # of ratings")
+# 
+# ```
+# ```{r summary statistics of em vs emr spread}
+# 
+# em_emr %>% 
+#   mutate(spread = em-emr) %>% 
+#   summarize("Min." = min(spread),
+#             "1st Qu." = quantile(spread,.25),
+#             Median = median(spread),
+#             Mean = mean(spread),
+#             "3rd Qu." = quantile(spread,.75),
+#             IQR = IQR(spread),
+#             "Max." = max(spread))
+# 
+# spread <- em_emr$em - em_emr$emr
+#   
+# hist(spread,breaks = 200, border = 0)
+# 
+# rm(em_emr, spread)
+
+```
+
+
+### Regularized user effect
+
+We will not construct a simple model for user effect straight from the average. Instead, we will model with regularization from the start. Model with user regularized movie effect:
+
+$Y = \mu + e_m^r + e_u^r+ \epsilon$
+
+where:
+$\mu$ = mean global rating
+$e_m^r$ = regularized movie effect 
+$e_u^r$ = regularized movie effect 
+$\epsilon$ = random residue
+
+We will select and optimal $\lambda$ for regularizing the user effect. We calculate the value of $\lambda$ by selecting the value that minimizes the residue after accounting for the mean rating $\mu$ and the regularized movie effect $e_m^r$.
+
+ALTERAR PARA FAZER A SELEÇÃO DO LAMBDA POR X-VALIDATION OU BOOTSTRAPPING
+
+```{r regularized user effect}
+
+# evaluate optimal lambda for user effect regularization
+
+lambda <- seq(0,10,.1)
+
+residue <- sapply(lambda, function(l){
+  reg_user_effect <-
+    predictions$train %>% 
+    mutate(residue = rating - `regularized movie effect`) %>% 
+    group_by(userId) %>% 
+    summarize("regularized user effect" = sum(residue) / (l + n()),
+              .groups = 'drop')
+  residue <- 
+    predictions$test %>% 
+    select(userId,rating, `regularized movie effect`) %>% 
+    left_join(reg_user_effect, by = "userId") %>% 
+    mutate(prediction = `regularized movie effect` + `regularized user effect`,
+           residue = rating - prediction) %>% 
+    summarize(rmse = RMSE(rating,prediction))
+  residue
+})
+
+plot(lambda,residue)
+
+lambda_optimal <- lambda[which.min(residue)]
+optimal.lambda$`regularized user effect` <- lambda[which.min(residue)] # 4.9
+
+# include regularized user effects in users object, with optimal lambda
+users <- 
+  predictions$train %>% 
+  mutate(residue = rating - `regularized movie effect`) %>% 
+  group_by(userId) %>% 
+  summarize("regularized user effect" = sum(residue) / (lambda_optimal + n()),
+            .groups = 'drop') %>% 
+  right_join(users, by = "userId")
+
+# add columns to predictions
+predictions$train <- 
+  predictions$train %>% 
+  left_join(users, by = "userId") %>% 
+  mutate(`regularized user effect` = `regularized movie effect` + `regularized user effect`)
+predictions$test <- 
+  predictions$test %>% 
+  left_join(users, by = "userId") %>% 
+  mutate(`regularized user effect` = `regularized movie effect` + `regularized user effect`)
+
+# calculate results on both the train and test sets
+results$train <- 
+  results$train %>% 
+  bind_rows(data.frame(name = "regularized user effect",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`regularized user effect`),
+                       description = "+ regularized user effect"))
+results$test <- 
+  results$test %>% 
+  bind_rows(data.frame(name = "regularized user effect",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`regularized user effect`),
+                       description = "+ regularized user effect"))
+
+# remove temp objects
+rm(lambda, lambda_optimal, residue, reg_user_effect)
+
+```
+
+### Saturation
+
+```{r saturation}
+
+# create saturation function
+saturation <- function(x, xmin, xmax){
+  sapply(x,function(x){
+    if (x < xmin) {x <- xmin}
+    if (x > xmax) {x <- xmax}
+    x
+  })
+}
+
+# add columns to predictions
+predictions$train <- 
+  predictions$train %>% 
+  mutate(`saturation` = saturation(`regularized user effect`,0.5,5))
+predictions$test <- 
+  predictions$test %>% 
+  mutate(`saturation` = saturation(`regularized user effect`,0.5,5))
+
+# calculate results on both the train and test sets
+results$train <- 
+  results$train %>% 
+  bind_rows(data.frame(name = "saturation",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$saturation),
+                       description = "+ saturation"))
+results$test <- 
+  results$test %>% 
+  bind_rows(data.frame(name = "saturation",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$saturation),
+                       description = "+ saturation"))
+
+
+```
+
+### garbage - Group effect - define movie groups and adjust predicted rating according to each user's reaction to them
+
+Obvious effects taken into account, let's investigate the residuals.
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS residue on the train set}
+
+# # calculate residue
+# residue <-
+#   predictions_train %>% 
+#   select(userId,movieId,rating,`+ reg. user effect`) %>% 
+#   left_join(emr, by = 'movieId') %>% 
+#   left_join(eur, by = 'userId') %>% 
+#   mutate(residue = rating - `+ reg. user effect`)
+# 
+# # rmse per user
+# rmse_user <- 
+#   residue %>% 
+#   group_by(userId) %>% 
+#   summarize(rmse = sqrt(mean(residue^2)),
+#             "user effect" = first(eur),
+#             count = n(),
+#             .groups = 'drop') %>% 
+#   arrange(desc(rmse))
+# 
+# residue %>% 
+#   top_n(100,residue)
+# 
+# rmse_user %>% 
+#   top_n(100,-rmse)
+# rmse_user %>% 
+#   top_n(100,rmse)
+
+```
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS investigate users with lower rmse}
+
+# residue %>% 
+#   filter(userId %in% top_n(rmse_user,12,-rmse)$userId) %>% 
+#   ggplot(aes(x = emr + mu, y = rating)) +
+#   geom_point(alpha = .1) +
+#   geom_line(aes(y = eur + mu),
+#             color = 'red') +
+#   geom_point(aes(x = emr + mu, y = `+ reg. user effect`), color = 'green') +
+#   geom_smooth(method = 'lm',
+#               formula = y ~ x) +
+#   labs(title = "users with lower rmse",
+#        x = "movie average",
+#        y = "actual rating") +
+#   coord_cartesian(xlim = c(0,5),
+#                   ylim = c(0,5)) +
+#   facet_wrap(userId ~ .)
+
+```
+There is a strong positive correlation between mean movie rating and the individual user's rating (meaning these users agree with the average)
+
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS investigate users with higher rmse}
+
+# residue %>% 
+#   filter(userId %in% top_n(rmse_user,12,rmse)$userId) %>% 
+#   ggplot(aes(x = emr + mu, y = rating)) +
+#   geom_point(alpha = .1) +
+#   geom_line(aes(y = eur + mu),
+#             color = 'red') +
+#   geom_point(aes(x = emr + mu, y = `+ reg. user effect`), color = 'green') +
+#   geom_smooth(method = 'lm',
+#               formula = y ~ x) +
+#   labs(title = "users with higher rmse",
+#        x = "movie average",
+#        y = "actual rating") +
+#   coord_cartesian(xlim = c(0,5),
+#                   ylim = c(0,5)) +
+#   facet_wrap(userId ~ .)
+
+```
+There is a strong negative correlation between mean movie rating and the individual user's rating (meaning these users disagree with the average)
+
+Let's look at RSE. By not taking the average, we are looking at users who actually have a high weight in the total RMSE.
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS investigate users with lower rse}
+
+# rse_user <- 
+#   residue %>% 
+#   group_by(userId) %>% 
+#   summarize(rse = sum(abs(residue)),
+#             "user effect" = first(eur),
+#             count = n(),
+#             .groups = 'drop') %>% 
+#   arrange(desc(rse))
+# 
+# top_n(rse_user,100,-rse)
+# 
+# residue %>% 
+#   filter(userId %in% top_n(rse_user,12,-rse)$userId) %>% 
+#   ggplot(aes(x = emr + mu, y = rating)) +
+#   geom_point(alpha = .1) +
+#   geom_line(aes(y = eur + mu),
+#             color = 'red') +
+#   geom_point(aes(x = emr + mu, y = `+ reg. user effect`), color = 'green') +
+#   geom_smooth(method = 'lm',
+#               formula = y ~ x) +
+#   labs(title = "users with lower rse",
+#        x = "movie average",
+#        y = "actual rating") +
+#   coord_cartesian(xlim = c(0,5),
+#                   ylim = c(0,5)) +
+#   facet_wrap(userId ~ .)
+
+```
+
+There is a positive correlation. Users tend to have low number of ratings.
+
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS investigate users with higher RSE}
+
+# top_n(rse_user,100,rse)
+# 
+# residue %>% 
+#   filter(userId %in% top_n(rse_user,12,rse)$userId) %>% 
+#   ggplot(aes(x = emr + mu, y = rating)) +
+#   geom_point(alpha = .1) +
+#   geom_line(aes(y = eur + mu),
+#             color = 'red') +
+#   geom_point(aes(x = emr + mu, y = `+ reg. user effect`), color = 'green') +
+#   geom_smooth(method = 'lm',
+#               formula = y ~ x) +
+#   labs(title = "users with higher rse",
+#        x = "movie average",
+#        y = "actual rating") +
+#   coord_cartesian(xlim = c(0,5),
+#                   ylim = c(0,5)) +
+#   facet_wrap(userId ~ .)
+
+```
+There is also a positive correlation, as demonstrated by the positive inclination of the 'lm' lines. This indicates that it is more profitable in terms of reducing the total error to evaluate what aspects affect the deviations than to investigate whether each user tends to agree with the overall average.
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS relationship between rmse & rse for sample of users}
+
+# inner_join(rmse_user, rse_user, by = 'userId') %>% 
+#   sample_n(100) %>% 
+#   ggplot(aes(x = rmse, y = rse))+
+#   geom_point()
+# 
+# edx %>% 
+#   select(userId,movieId) %>% 
+#   sample_n(1000) %>% 
+#   group_by(movieId) %>% 
+#   summarize(count = n())
+
+
+```
+
+```{r ATUALIZAR COM NOVAS VARIÁVEISuser effect per movie average}
+
+# sample_users <- 
+#   unique(train$userId) %>% 
+#   sample(10000)
+# 
+# 
+# train %>% 
+#   select(userId,movieId,rating) %>%
+#   filter(userId %in% sample_users) %>% 
+#   left_join(movie_averages, by = 'movieId') %>% 
+#   mutate(round = round(`average rating`*2,0)/2) %>% 
+#   ggplot(aes(x = round, group = round, y = rating)) +
+#   geom_boxplot()
+# 
+# train %>% 
+#   select(userId,movieId,rating) %>%
+#   filter(userId %in% sample_users) %>% 
+#   left_join(movie_averages, by = 'movieId') %>% 
+#   mutate(round = round(`average rating`,0)) %>% 
+#   group_by(round) %>% 
+#   summarize(mean(rating),
+#             median(rating),
+#             n())
+
+
+```
+
+```{r ATUALIZAR COM NOVAS VARIÁVEIS}
+
+# sample_users <- 
+#   train %>% 
+#   select(userId, movieId) %>% 
+#   group_by(userId) %>% 
+#   summarize(count = n()) %>% 
+#   arrange(desc(count)) %>% 
+#   top_n(10)
+#   
+# train %>% 
+#   filter(userId %in% sample_users$userId) %>% 
+#   select(userId, movieId) %>% 
+#   group_by(movieId) %>% 
+#   summarize(count = n()) %>% 
+#   arrange(desc(count)) %>% 
+#   pull(count) %>% 
+#   table
+
+
+```
+
+```{r age and year of release}
+
+predictions$train %>% 
+  mutate(residue = rating - `regularized user effect`) %>% 
+  left_join(select(movies,movieId,year), by = 'movieId') %>% 
+  group_by(year) %>% 
+  summarize(residue = mean(residue)) %>% 
+  ggplot(aes(x = year, y = residue))+
+  geom_point()
+
+
+predictions$train %>% 
+  mutate(residue = rating - `regularized user effect`) %>% 
+  ggplot(aes(x = residue))+
+  geom_histogram()
+
+predictions$train %>% 
+  left_join(select(movies,movieId,title), by = 'movieId') %>% 
+  select(-`naive mean`, -`simple movie effect`, - `movieId`, -`regularized user effect`) %>% 
+  filter(userId == 1001)
+  
+
+```
+
+```{r distance between movies}
+
+movie.correlation <- function(movie1, movie2) {
+  i <- 1:length(movie1)
+  sapply(i,function(i){
+     inner_join(filter(select(edx,userId,movieId,rating), movieId == movie1[i]),
+                filter(select(edx,userId,movieId,rating), movieId == movie2[i]),
+                by = 'userId',
+                suffix = c("1", "2")) %>% 
+      summarize(correlation = cor(rating1,rating2),
+                count = n()) %>% 
+      mutate(correlation = if_else(is.na(correlation),0,correlation)) %>% 
+      pull(correlation)
+  })
+}
+
+popular.movies <- 
+  train %>% 
+  group_by(movieId,title) %>% 
+  summarize(count = n(),
+            .groups = 'drop') %>% 
+  arrange(desc(count)) %>% 
+  top_n(n = 100, wt = count) %>% 
+  select(-count)
+
+# calculated with absolute ratings, needs to be done also with residuals
+correlation.ratings <- 
+  expand.grid(movie1 = popular.movies$movieId,
+              movie2 = popular.movies$movieId) %>% 
+  mutate(correlation = 0) %>% 
+  mutate(correlation = movie.correlation(movie1,movie2))
+
+correlation.ratings %>% 
+  pivot_wider(names_from = "movie2",
+              values_from = "correlation") %>% 
+  column_to_rownames(var = "movie1") %>% 
+  as.matrix %>% 
+  heatmap()
+
+
+# DETERMINE MOVIE GROUPS FROM THIS HEATMAP/TREE !!!!
+# if used for predictions, restrict to train set
+
+
+# same calculation, with residuals
+
+residue <- 
+  predictions$train %>% 
+  mutate(residue = rating - saturation) %>% 
+  select(userId,movieId,residue)
+
+residue.correlation <- function(movie1, movie2) {
+  i <- 1:length(movie1)
+  sapply(i,function(i){
+     inner_join(filter(select(residue,userId,movieId,residue), movieId == movie1[i]),
+                filter(select(residue,userId,movieId,residue), movieId == movie2[i]),
+                by = 'userId',
+                suffix = c("1", "2")) %>% 
+      summarize(correlation = cor(residue1,residue2),
+                count = n()) %>% 
+      mutate(correlation = if_else(is.na(correlation),0,correlation)) %>% 
+      pull(correlation)
+  })
+}
+
+correlation.residues <- 
+  expand.grid(movie1 = popular.movies$movieId,
+              movie2 = popular.movies$movieId) %>% 
+  mutate(correlation = 0) %>% 
+  mutate(correlation = residue.correlation(movie1,movie2))
+
+
+correlation.residues %>% 
+  pivot_wider(names_from = "movie2",
+              values_from = "correlation") %>% 
+  column_to_rownames(var = "movie1") %>% 
+  as.matrix %>% 
+  heatmap()
+
+# DETERMINE MOVIE GROUPS FROM THIS HEATMAP/TREE AND COMPARE WITH CALCULATION BASED ON ABSOLUTE VALUES !!!!
+
+
+# calculation of euclidean distances between movie ratings
+
+residue.rmse <- function(movie1, movie2) {
+  i <- 1:length(movie1)
+  sapply(i,function(i){
+     inner_join(filter(select(residue,userId,movieId,residue), movieId == movie1[i]),
+                filter(select(residue,userId,movieId,residue), movieId == movie2[i]),
+                by = 'userId',
+                suffix = c("1", "2")) %>% 
+      summarize(rmse = sqrt(mean((residue1-residue2)^2))) %>% 
+      mutate(rmse = if_else(is.na(rmse),0,as.numeric(rmse))) %>% 
+      pull(rmse)
+  })
+}
+
+distance.rmse <- 
+  expand.grid(movie1 = popular.movies$movieId,
+              movie2 = popular.movies$movieId) %>% 
+  mutate(rmse = 0) %>% 
+  mutate(rmse = residue.rmse(movie1,movie2))
+
+# investigation of the rmse distances
+
+distance.rmse %>% 
+  filter(movie1 < movie2) %>% 
+  arrange(movie1) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie1" = "movieId")) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie2" = "movieId")) %>% 
+  select("movie 1" = title.x,
+         "movie 2" = title.y,
+         rmse) %>% 
+  arrange(rmse) %>% 
+  kable()
+  
+
+# investigation of the correlation
+
+correlation.residues %>% 
+  filter(movie1 < movie2) %>% 
+  arrange(movie1) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie1" = "movieId")) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie2" = "movieId")) %>% 
+  select("movie 1" = title.x,
+         "movie 2" = title.y,
+         correlation) %>%  
+  arrange(desc(correlation)) %>% 
+  mutate(correlation = round(correlation,3)) %>% 
+  kable()
+
+
+```
+```{r garbage}
+
+## same table, with absolute ratings
+# distances %>% 
+#   filter(movie1 < movie2) %>% 
+#   arrange(movie1) %>% 
+#   left_join(select(movies,movieId,title),
+#             by = c("movie1" = "movieId")) %>% 
+#   left_join(select(movies,movieId,title),
+#             by = c("movie2" = "movieId")) %>% 
+#   select("movie 1" = title.x,
+#          "movie 2" = title.y,
+#          correlation) %>%  
+#   arrange(desc(correlation)) %>% 
+#   mutate(correlation = round(correlation,3)) %>% 
+#   kable()
+
+# distances
+# object.size(distances)
+# object.size(distances.residues)
+# object.size(correlation)
+# 
+# rm(movie1, movie2, popular.movies)
+
+
+# tree %>% glimpse
+# tree %>% summary
+# tree %>% class
+# disp(tree)
+# image(tree)
+
+
+# clusters <-
+#   correlation.residues %>% 
+#   pivot_wider(names_from = "movie2",
+#               values_from = "correlation") %>% 
+#   column_to_rownames(var = "movie1") %>% 
+#   as.matrix %>% 
+#   sweep(MARGIN =1,
+#         STAT = 1,
+#         FUN = function(vec,bias){1/(vec+bias)}) %>% 
+#   as.dist() %>% 
+#   hclust()
+# 
+# 
+# clusters %>% glimpse
+# 
+# clusters$labels <-
+#   data.frame(movieId = as.numeric(clusters$labels)) %>% 
+#   left_join(select(movies,movieId,title), by="movieId") %>% 
+#   select(title) %>% 
+#   mutate(title = str_trunc(title,30)) %>% 
+#   as.matrix
+
+# prune(clusters)
+```
+
+```{r calculate distances using ratings instead of residuals}
+
+# calculation of euclidean distances between movie ratings
+
+calculate.ratings.rmse <- function(movie1, movie2) {
+  i <- 1:length(movie1)
+  sapply(i,function(i){
+     inner_join(filter(select(train,userId,movieId,rating), movieId == movie1[i]),
+                filter(select(train,userId,movieId,rating), movieId == movie2[i]),
+                by = 'userId',
+                suffix = c("1", "2")) %>% 
+      summarize(rmse = sqrt(mean((rating1-rating2)^2))) %>% 
+      mutate(rmse = if_else(is.na(rmse),0,as.numeric(rmse))) %>% 
+      pull(rmse)
+  })
+}
+
+ratings.rmse <- 
+  expand.grid(movie1 = popular.movies$movieId,
+              movie2 = popular.movies$movieId) %>% 
+  mutate(rmse = 0) %>% 
+  mutate(rmse = calculate.ratings.rmse(movie1,movie2))
+
+# investigation of the rmse distances
+
+ratings.rmse %>% 
+  filter(movie1 < movie2) %>% 
+  arrange(movie1) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie1" = "movieId")) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie2" = "movieId")) %>% 
+  select("movie 1" = title.x,
+         "movie 2" = title.y,
+         rmse) %>% 
+  arrange(rmse) %>% 
+  kable()
+
+# VERIFICAR SE OS COMPORTAMENTOS E CLUSTERS QUE APARECEM OLHANDO RESÍDUOS TAMBÉM APARECEM OLHANDO RATINGS PUROS
+# VERIFICAR COMO FICAM OS RMSE ENTRE FILMES ALTAMENTE CORRELACIONADOS E COMO SE COMPARAM COM O MELHOR MÉTODO ATÉ AGORA
+
+
+```
+```{r compare rmse calculated from ratings and from residuals}
+
+inner_join(distance.rmse,
+           ratings.rmse,
+           by = c("movie1","movie2")) %>% 
+  left_join(select(movies,movieId,title),by = c("movie1" = "movieId")) %>% 
+    left_join(select(movies,movieId,title),by = c("movie2" = "movieId")) %>% 
+  rename(rmse.residuals = rmse.x,
+         rmse.ratings = rmse.y,
+         title1 = title.x,
+         title2 = title.y) %>%
+  select(movie1,title1,movie2,title2,rmse.ratings,rmse.residuals) %>% 
+  ggplot(aes(x = rmse.ratings, y = rmse.residuals)) +
+  geom_point(alpha = .2, size = .5) +
+  geom_abline(slope = 1, intercept = 0, color = 'red') +
+  labs(title = "RMSE between pairs of movies",
+       subtitle = "calculated for each pair using ratings vs using residuals",
+       x = "RMSE calculated from movie ratings",
+       y = "RMSE calculated from residuals")
+
+
+```
+RMSE from residuals are nearly always smaller, which indicates that they have more predictive power.
+
+```{r residuals calculated from each movie average}
+
+train %>% 
+  # filter(movieId %in% popular.movies) %>% 
+  group_by(movieId,title) %>% 
+  summarise("mean rating" = mean(rating),
+            "rmse rating" = sqrt(mean((rating - `mean rating`)^2)),
+            n = n()) %>% 
+  filter(n > 100) %>% 
+  arrange(`rmse rating`) %>% 
+  ggplot(aes(x = `mean rating`, y = `rmse rating`)) +
+  geom_point()
+
+```
+
+
+```{r movie clusters}
+
+# heatmap according to rmse
+# distance.rmse %>% 
+#   left_join(select(movies,movieId,title),
+#             by = c("movie1" = "movieId")) %>% 
+#   left_join(select(movies,movieId,title),
+#             by = c("movie2" = "movieId")) %>% 
+#   select("title 1" = "title.x",
+#          "title 2" = "title.y",
+#          rmse = rmse) %>% 
+#   pivot_wider(names_from = "title 2",
+#               values_from = "rmse") %>% 
+#   column_to_rownames("title 1") %>% 
+#   as.matrix() %>% 
+#   heatmap()
+
+# hierarchical clusters according to rmse
+clusters <-
+  distance.rmse %>% 
+  pivot_wider(names_from = "movie2",
+              values_from = "rmse") %>% 
+  left_join(select(movies,movieId,title), 
+            by = c("movie1" = "movieId")) %>% 
+  select(-movie1) %>% 
+  column_to_rownames("title") %>% 
+  as.dist() %>% 
+  hclust()
+
+# plot tree
+
+plot(clusters, cex = .7)
+
+clusters %>% 
+  cutree(k = 10) %>% 
+  as.data.frame() %>% 
+  rename("cluster" = ".") %>% 
+  rownames_to_column("title") %>% 
+  arrange(cluster) %>% 
+  kable()
+
+popular.movies <-
+  popular.movies %>% 
+  mutate("broad.group" = cutree(clusters,4),
+         "medium.group" = cutree(clusters,25),
+         "narrow.group" = cutree(clusters,50))
+
+```
+
+```{r create groups object}
+
+broad <- 
+  popular.movies %>% 
+  left_join(select(residue,movieId,residue), by = "movieId") %>% 
+  group_by(broad.group) %>% 
+  summarise("mean residue" = mean(residue)) %>% 
+  mutate(grouping = "broad") %>% 
+  rename(group = broad.group) %>% 
+  select(grouping, group, `mean residue`)
+
+medium <- 
+  popular.movies %>% 
+  left_join(select(residue,movieId,residue), by = "movieId") %>% 
+  group_by(medium.group) %>% 
+  summarise("mean residue" = mean(residue)) %>% 
+  mutate(grouping = "medium") %>% 
+  rename(group = medium.group) %>% 
+  select(grouping, group, `mean residue`)
+
+narrow <- 
+  popular.movies %>% 
+  left_join(select(residue,movieId,residue), by = "movieId") %>% 
+  group_by(narrow.group) %>% 
+  summarise("mean residue" = mean(residue)) %>% 
+  mutate(grouping = "narrow") %>% 
+  rename(group = narrow.group) %>% 
+  select(grouping, group, `mean residue`)
+
+groups <- 
+  bind_rows(broad,medium,narrow)
+
+rm(broad,medium,narrow)
+
+
+```
+
+```{r user popular.movies grouping to find patterns for other movies}
+
+shared.users <- function(movie1,movie2,set){
+  i <- 1:length(movie1)
+  sapply(i,function(i){
+    set %>% 
+    filter(movieId == movie1[i] | movieId == movie2[i]) %>% 
+    group_by(userId) %>% 
+    summarise(n = n(),
+              .groups = 'drop') %>% 
+    filter(n == 2) %>% 
+    nrow()
+  })
+}
+
+sample.movies <-
+  movies %>% 
+  filter(!(movieId %in% popular.movies$movieId)) %>% 
+  select(movieId,title) %>%
+  sample_n(200)
+
+sample.rmse <-
+  expand.grid(movie1 = sample.movies$movieId,
+              movie2 = popular.movies$movieId) %>% 
+  mutate(rmse = 0) %>% 
+  mutate(rmse = residue.rmse(movie1,movie2),
+         n = shared.users(movie1,movie2,train))
+
+narrow <- 
+  sample.rmse %>% 
+  left_join(select(movies,movieId,title), by = c("movie1" = "movieId")) %>% 
+  left_join(select(popular.movies,movieId,narrow.group), by = c("movie2" = "movieId")) %>% 
+  select(title,rmse,n,narrow.group) %>% 
+  group_by(title,narrow.group) %>% 
+  summarise("mean rmse" = mean(rmse),
+            n = sum(n)) %>% 
+  filter(n > 100) %>% 
+  group_by(title) %>% 
+  summarise(narrow.group = narrow.group[which.min(`mean rmse`)],
+            narrow.group.rmse = min(`mean rmse`))
+
+medium <- 
+  sample.rmse %>% 
+  left_join(select(movies,movieId,title), by = c("movie1" = "movieId")) %>% 
+  left_join(select(popular.movies,movieId,medium.group), by = c("movie2" = "movieId")) %>% 
+  select(title,rmse,n,medium.group) %>% 
+  group_by(title,medium.group) %>% 
+  summarise("mean rmse" = mean(rmse),
+            n = sum(n)) %>% 
+  filter(n > 100) %>% 
+  group_by(title) %>% 
+  summarise(medium.group = medium.group[which.min(`mean rmse`)],
+            medium.group.rmse = min(`mean rmse`))
+
+broad <- 
+  sample.rmse %>% 
+  left_join(select(movies,movieId,title), by = c("movie1" = "movieId")) %>% 
+  left_join(select(popular.movies,movieId,broad.group), by = c("movie2" = "movieId")) %>% 
+  select(title,rmse,n,broad.group) %>% 
+  group_by(title,broad.group) %>% 
+  summarise("mean rmse" = mean(rmse),
+            n = sum(n)) %>% 
+  filter(n > 100) %>% 
+  group_by(title) %>% 
+  summarise(broad.group = broad.group[which.min(`mean rmse`)],
+            broad.group.rmse = min(`mean rmse`))
+
+# sample.movies <-
+#   sample.movies %>% 
+#   left_join(narrow, by = "title") %>% 
+#   left_join(medium, by = "title") %>% 
+#   left_join(broad, by = "title") %>% 
+#   select(movieId,title,broad.group,medium.group,narrow.group,broad.group.rmse,medium.group.rmse,narrow.group.rmse)
+
+sample.movies <-
+  sample.movies %>%
+  left_join(narrow, by = "title") %>%
+  left_join(medium, by = "title") %>%
+  left_join(broad, by = "title") %>%
+  select(movieId,title,broad.group,medium.group,narrow.group,broad.group.rmse,medium.group.rmse,narrow.group.rmse)
+
+rm(broad,medium,narrow)
+
+# # include the average rating for the 3 groups and calculate grouping effect
+# sample.movies <-
+#   sample.movies %>% 
+#   left_join(select(filter(groups, grouping == "broad"),group,`mean residue`),
+#             by = c("broad.group"="group")) %>% 
+#   rename(broad.group.mean = `mean residue`) %>% 
+#   left_join(select(filter(groups, grouping == "medium"),group,`mean residue`),
+#             by = c("medium.group"="group")) %>% 
+#   rename(medium.group.mean = `mean residue`) %>% 
+#   left_join(select(filter(groups, grouping == "narrow"),group,`mean residue`),
+#             by = c("narrow.group"="group")) %>% 
+#   rename(narrow.group.mean = `mean residue`) %>% 
+#   mutate("mean residue from groups" = 
+#            rowMeans(matrix(c(broad.group.mean,medium.group.mean,narrow.group.mean), ncol = 3, byrow = FALSE)))
+# 
+# # update predictions with grouping effect
+# 
+# sample.predictions <-
+#   predictions$test %>% 
+#   filter(movieId %in% sample.movies$movieId) %>% 
+#   left_join(select(sample.movies,movieId,`mean residue from groups`), by = "movieId") %>% 
+#   mutate("group effect" = saturation(`regularized user effect` + `mean residue from groups`, 0.5, 5)) %>% 
+#   select(-`mean residue from groups`)
+# 
+# sample.predictions %>% 
+#   ungroup %>% 
+#   summarise(rmse.current = sqrt(mean((saturation-rating)^2)),
+#             rmse.grouping = sqrt(mean((`group effect`-rating)^2)))
+
+
+# rm(sample.predictions)
+
+sample.movies
+
+
+# investigate sample users responses to the 100 most popular movies and their groupings
+
+sample.users <-
+  train %>% 
+  filter(movieId %in% sample.movies$movieId) %>% 
+  select(userId)
+
+# only consider if user rated this many movies from a particular group - NOT IMPLEMENTED YET
+# cutoff.broad <- 1
+# cutoff.medium <- 1
+# cutoff.broad <- 1
+
+broad <- 
+  residue %>% 
+  filter(userId %in% sample.users$userId & movieId %in% popular.movies$movieId) %>% 
+  left_join(select(popular.movies,movieId,broad.group),
+            by = "movieId") %>% 
+  group_by(userId,broad.group) %>%
+  summarise("mean residue" = mean(residue)) %>% 
+  mutate(grouping = "broad") %>% 
+  rename("group" = "broad.group") %>% 
+  select(userId,grouping,group,`mean residue`)
+
+medium <- 
+  residue %>% 
+  filter(userId %in% sample.users$userId & movieId %in% popular.movies$movieId) %>% 
+  left_join(select(popular.movies,movieId,medium.group),
+            by = "movieId") %>% 
+  group_by(userId,medium.group) %>%
+  summarise("mean residue" = mean(residue)) %>% 
+  mutate(grouping = "medium") %>% 
+  rename("group" = "medium.group") %>% 
+  select(userId,grouping,group,`mean residue`)
+
+narrow <- 
+  residue %>% 
+  filter(userId %in% sample.users$userId & movieId %in% popular.movies$movieId) %>% 
+  left_join(select(popular.movies,movieId,narrow.group),
+            by = "movieId") %>% 
+  group_by(userId,narrow.group) %>%
+  summarise("mean residue" = mean(residue)) %>% 
+  mutate(grouping = "narrow") %>% 
+  rename("group" = "narrow.group") %>% 
+  select(userId,grouping,group,`mean residue`)
+  
+# sample.groups <-
+#   bind_rows(broad,medium,narrow)
+
+# average of the 3
+predictions$test %>% 
+  select(userId,movieId,rating,saturation) %>% 
+  filter(movieId %in% sample.movies$movieId) %>% 
+  left_join(select(sample.movies,movieId,broad.group,medium.group,narrow.group),
+            by = "movieId") %>% 
+  left_join(select(broad,userId,group,`mean residue`),
+            by = c("userId", "broad.group" = "group")) %>% 
+  rename("broad.residue" = "mean residue") %>% 
+  left_join(select(medium,userId,group,`mean residue`),
+            by = c("userId", "medium.group" = "group")) %>% 
+  rename("medium.residue" = "mean residue") %>% 
+  left_join(select(narrow,userId,group,`mean residue`),
+            by = c("userId", "narrow.group" = "group")) %>% 
+  rename("narrow.residue" = "mean residue") %>% 
+  mutate("group effect" = 
+           rowMeans(matrix(c(broad.residue,medium.residue,narrow.residue), ncol = 3, byrow = FALSE))) %>% 
+  select(-c(broad.group,medium.group,narrow.group,broad.residue,medium.residue,narrow.residue)) %>% 
+  replace_na(list(`group effect` = 0)) %>% 
+  mutate("group effect" = saturation + `group effect`) %>% 
+  ungroup() %>% 
+  summarize(rmse.saturation = sqrt(mean((rating-saturation)^2)),
+            rmse.group = sqrt(mean((rating-`group effect`)^2)))
+
+# # only 1
+predictions$test %>%
+  select(userId,movieId,rating,saturation) %>%
+  filter(movieId %in% sample.movies$movieId) %>%
+  left_join(select(sample.movies,movieId,broad.group,medium.group,narrow.group),
+            by = "movieId") %>%
+  left_join(select(broad,userId,group,`mean residue`),
+            by = c("userId", "broad.group" = "group")) %>%
+  rename("broad.residue" = "mean residue") %>%
+  left_join(select(medium,userId,group,`mean residue`),
+            by = c("userId", "medium.group" = "group")) %>%
+  rename("medium.residue" = "mean residue") %>%
+  left_join(select(narrow,userId,group,`mean residue`),
+            by = c("userId", "narrow.group" = "group")) %>%
+  rename("narrow.residue" = "mean residue") %>%
+  mutate("group effect" = narrow.residue) %>%
+  select(-c(broad.group,medium.group,narrow.group,broad.residue,medium.residue,narrow.residue)) %>%
+  replace_na(list(`group effect` = 0)) %>%
+  mutate("group effect" = saturation + `group effect`) %>%
+  ungroup() %>%
+  summarize(rmse.saturation = sqrt(mean((rating-saturation)^2)),
+            rmse.group = sqrt(mean((rating-`group effect`)^2)))
+
+# # fraction of the effect
+predictions$test %>%
+  select(userId,movieId,rating,saturation) %>%
+  filter(movieId %in% sample.movies$movieId) %>%
+  left_join(select(sample.movies,movieId,broad.group,medium.group,narrow.group),
+            by = "movieId") %>%
+  left_join(select(broad,userId,group,`mean residue`),
+            by = c("userId", "broad.group" = "group")) %>%
+  rename("broad.residue" = "mean residue") %>%
+  left_join(select(medium,userId,group,`mean residue`),
+            by = c("userId", "medium.group" = "group")) %>%
+  rename("medium.residue" = "mean residue") %>%
+  left_join(select(narrow,userId,group,`mean residue`),
+            by = c("userId", "narrow.group" = "group")) %>%
+  rename("narrow.residue" = "mean residue") %>%
+  mutate("group effect" =
+           rowMeans(matrix(c(broad.residue,medium.residue,narrow.residue), ncol = 3, byrow = FALSE))) %>%
+  select(-c(broad.group,medium.group,narrow.group,broad.residue,medium.residue,narrow.residue)) %>%
+  replace_na(list(`group effect` = 0)) %>%
+  mutate("group effect" = `group effect` / 10) %>%
+  mutate("group effect" = saturation + `group effect`) %>%
+  ungroup() %>%
+  summarize(rmse.saturation = sqrt(mean((rating-saturation)^2)),
+            rmse.group = sqrt(mean((rating-`group effect`)^2)))
+
+# # weighted average
+predictions$test %>%
+  select(userId,movieId,rating,saturation) %>%
+  filter(movieId %in% sample.movies$movieId) %>%
+  left_join(select(sample.movies,movieId,broad.group,medium.group,narrow.group),
+            by = "movieId") %>%
+  left_join(select(broad,userId,group,`mean residue`),
+            by = c("userId", "broad.group" = "group")) %>%
+  rename("broad.residue" = "mean residue") %>%
+  left_join(select(medium,userId,group,`mean residue`),
+            by = c("userId", "medium.group" = "group")) %>%
+  rename("medium.residue" = "mean residue") %>%
+  left_join(select(narrow,userId,group,`mean residue`),
+            by = c("userId", "narrow.group" = "group")) %>%
+  rename("narrow.residue" = "mean residue") %>%
+  mutate("group effect" =
+           (1/10)*rowMeans(matrix(c(.1,.9,2) * c(broad.residue,medium.residue,narrow.residue), ncol = 3, byrow = FALSE))) %>%
+  select(-c(broad.group,medium.group,narrow.group,broad.residue,medium.residue,narrow.residue)) %>%
+  replace_na(list(`group effect` = 0)) %>%
+  mutate("group effect" = `group effect`) %>%
+  mutate("group effect" = saturation + `group effect`) %>%
+  ungroup() %>%
+  summarize(rmse.saturation = sqrt(mean((rating-saturation)^2)),
+            rmse.group = sqrt(mean((rating-`group effect`)^2)))
+
+# "regularization" - find best value with train, apply with test
+predictions$train %>%
+  select(userId,movieId,rating,saturation) %>%
+  filter(movieId %in% sample.movies$movieId) %>%
+  left_join(select(sample.movies,movieId,broad.group,medium.group,narrow.group),
+            by = "movieId") %>%
+  left_join(select(broad,userId,group,`mean residue`),
+            by = c("userId", "broad.group" = "group")) %>%
+  rename("broad.residue" = "mean residue") %>%
+  left_join(select(medium,userId,group,`mean residue`),
+            by = c("userId", "medium.group" = "group")) %>%
+  rename("medium.residue" = "mean residue") %>%
+  left_join(select(narrow,userId,group,`mean residue`),
+            by = c("userId", "narrow.group" = "group")) %>%
+  rename("narrow.residue" = "mean residue") %>%
+  mutate("group effect" =
+           (1/2.7)*rowMeans(matrix(c(broad.residue,medium.residue,narrow.residue), ncol = 3, byrow = FALSE))) %>%
+  select(-c(broad.group,medium.group,narrow.group,broad.residue,medium.residue,narrow.residue)) %>%
+  replace_na(list(`group effect` = 0)) %>%
+  mutate("group effect" = `group effect`) %>%
+  mutate("group effect" = saturation + `group effect`) %>%
+  ungroup() %>%
+  summarize(rmse.saturation = sqrt(mean((rating-saturation)^2)),
+            rmse.group = sqrt(mean((rating-`group effect`)^2)))
+
+predictions$test %>%
+  select(userId,movieId,rating,saturation) %>%
+  filter(movieId %in% sample.movies$movieId) %>%
+  left_join(select(sample.movies,movieId,broad.group,medium.group,narrow.group),
+            by = "movieId") %>%
+  left_join(select(broad,userId,group,`mean residue`),
+            by = c("userId", "broad.group" = "group")) %>%
+  rename("broad.residue" = "mean residue") %>%
+  left_join(select(medium,userId,group,`mean residue`),
+            by = c("userId", "medium.group" = "group")) %>%
+  rename("medium.residue" = "mean residue") %>%
+  left_join(select(narrow,userId,group,`mean residue`),
+            by = c("userId", "narrow.group" = "group")) %>%
+  rename("narrow.residue" = "mean residue") %>%
+  mutate("group effect" =
+           (1/2.7)*rowMeans(matrix(c(broad.residue,medium.residue,narrow.residue), ncol = 3, byrow = FALSE))) %>%
+  select(-c(broad.group,medium.group,narrow.group,broad.residue,medium.residue,narrow.residue)) %>%
+  replace_na(list(`group effect` = 0)) %>%
+  mutate("group effect" = `group effect`) %>%
+  mutate("group effect" = saturation + `group effect`) %>%
+  ungroup() %>%
+  summarize(rmse.saturation = sqrt(mean((rating-saturation)^2)),
+            rmse.group = sqrt(mean((rating-`group effect`)^2)))
+
+
+```
+Can't use the calculated effect without adjustment, it worsens the RMSE. Calculation is done based on the few movies the user has rated inside each group, so there is a lot of random variability. Training is necessary to find optimal values for the weight of each of the group effects (broad, medium, and narrow groups) and the overall weight of the combined effect. Given proper adjustment of these values, the RMSE can decrease in the order of 0.005.
+
+However, the computation of which groups each movie is closer to is very intensive and would require weeks to complete to the entire dataset. It is not practical to do so on a personal computer, but would be appropriate in a professional setting.
+
+
+```{r compare residuals for some movies}
+
+distance.rmse %>% 
+  filter(movie1 < movie2) %>% 
+  arrange(movie1) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie1" = "movieId")) %>% 
+  left_join(select(movies,movieId,title),
+            by = c("movie2" = "movieId")) %>% 
+  select("title 1" = title.x,
+         "id 1" = movie1,
+         "title 2" = title.y,
+         "id 2" = movie2,
+         rmse) %>% 
+  arrange(rmse) %>% 
+  kable()
+
+residue %>% 
+  filter(movieId == 4993 | movieId == 5952) %>% 
+  pivot_wider(names_from = "movieId",
+              values_from = "residue") %>% 
+  filter(!is.na(`4993`) & !is.na(`5952`)) %>% 
+  ggplot(aes(x = `4993`, y = `5952`)) +
+  geom_point(alpha = .001) +
+  geom_density2d() +
+  geom_point(aes(x = mean(`4993`),
+                 y = mean(`5952`)),
+             color = 'red', size = 2)
+
+residue %>% 
+  filter(movieId == 288 | movieId == 1721) %>% 
+  pivot_wider(names_from = "movieId",
+              values_from = "residue") %>% 
+  filter(!is.na(`288`) & !is.na(`1721`)) %>% 
+  ggplot(aes(x = `288`, y = `1721`)) +
+  geom_point(alpha = .01) +
+  geom_density2d() +
+  geom_point(aes(x = mean(`288`),
+                 y = mean(`1721`)),
+             color = 'red', size = 2)
+
+```
+
+### Effect of movie genres
+
+Factorization - each movie receives a TRUE/FALSE for each genre and each user receives a genre effect; the more genres we include, the higher the order of the factorization.
+
+Investigate whether pc analysis works better
+
+(talvez funcione, os resultados ruins que tive antes podem ter sido simplesmente porque não descontei a média)
+
+```{r investigation of drama movies}
+
+# check that drama is the most common genre
+genres.long %>% 
+  group_by(genre) %>% 
+  summarise(n = n(),
+            .groups = 'drop') %>% 
+  arrange(desc(n))
+
+# histogram of how each user reacts to drama movies on average
+transmute(predictions$train,
+          userId = userId,
+          movieId = movieId,
+          residue = rating - saturation) %>% 
+  left_join(filter(genres.long, genre == "Drama"), by = "movieId") %>% 
+  filter(genre == "Drama") %>% 
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(residue),
+            n = n()) %>% 
+  ggplot(aes(x = `mean residue`)) +
+  geom_histogram(binwidth = .05, color = 'gray') +
+  labs(title = "Histogram of user mean residue for drama movies",
+       x = "Mean residue \n(.05 intervals)",
+       y = "Number of users")
+
+# standard deviation
+transmute(predictions$train,
+          userId = userId,
+          movieId = movieId,
+          residue = rating - saturation) %>% 
+  left_join(filter(genres.long, genre == "Drama"), by = "movieId") %>% 
+  filter(genre == "Drama") %>% 
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(residue),
+            n = n(),
+            .groups = 'drop') %>%
+  summarise("std" = sd(`mean residue`))
+
+# hypothesis test - random sample of 5336 movies (same amount of drama movies)
+
+res <- replicate(1000,{
+  movies %>% 
+  select(movieId) %>% 
+  sample_n(5336) %>% 
+  left_join(predictions$train, by = "movieId") %>% 
+  transmute(userId = userId,
+            movieId = movieId,
+            residue = rating - saturation) %>% 
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(residue),
+            n = n(),
+            .groups = 'drop') %>% 
+  summarise("std" = sd(`mean residue`)) %>% 
+  pull(std)
+})
+
+quantile(res,c(.025,.25,.50,.75,.975))
+max(res)
+# p-value
+1-pnorm(0.2483291,mean(res),sd(res))
+
+data.frame(res = res) %>% 
+  ggplot(aes(x = res)) +
+  geom_histogram(binwidth = .001, color = 'gray') +
+  labs(title = "Standard Deviation of genre effect - null hypothesis test",
+       x = "Standard Deviation",
+       y = "Number of users")
+
+
+```
+
+
+
+```{r correlation between overall residuals and drama movie residuals}
+
+predictions$train %>% 
+  mutate(residue = rating - saturation) %>% 
+  group_by(userId) %>% 
+  summarise("user mean residue" = mean(residue),
+            .groups = 'drop')  %>% 
+  select(userId,`user mean residue`) %>% 
+  right_join(predictions$train, by = "userId") %>% 
+  left_join(select(movies,movieId,genres), by = "movieId") %>% 
+  filter(str_detect(genres, "Drama")) %>% 
+  mutate(residue = rating - saturation) %>% 
+  group_by(userId) %>% 
+  summarise("user mean residue" = first(`user mean residue`),
+            "user mean residue (drama only)" = mean(residue), # lambda should go here
+            "total drama movies" = n()) %>% 
+  summarise(correlation = cor(`user mean residue`,
+                              `user mean residue (drama only)`))
+
+
+
+```
+
+This low correlation means that the residuals on the subset of the movie tagged with "drama" is highly independent on the overall residuals. This indicates that there is an effect that is not explained as random variability due to sampling (choosing a subset of all movies).
+
+```{r calculation of genre effect for drama movies}
+
+# simple mean (lambda = 0)
+lambda <- 0
+
+# get mean residue for each movie
+predictions$train %>%
+  mutate(residue = rating - saturation) %>%
+  group_by(userId) %>%
+  summarise("user mean residue" = mean(residue),
+            .groups = 'drop')  %>%
+  select(userId,`user mean residue`) %>%
+  right_join(predictions$train, by = "userId") %>%
+  # incorporate movie genres to filter movies with 'drama' and get genre effect for drama movies
+  left_join(select(movies,movieId,genres), by = "movieId") %>%
+  filter(str_detect(genres, "Drama")) %>%
+  mutate(residue = rating - saturation) %>%
+  group_by(userId) %>%
+  summarise("user mean residue" = first(`user mean residue`),
+            "user mean residue (drama only)" = sum(residue)/(lambda + n()),
+            "genre effect (drama)" = `user mean residue (drama only)` - `user mean residue`,
+            "total drama movies" = n()) %>%
+  select(userId,`genre effect (drama)`) %>%
+  # incorporate genre effect for each user into the test set and calculate predictions corrected by this effect
+  right_join(predictions$test, by = "userId") %>%
+  replace_na(list(`genre effect (drama)` = 0)) %>%
+  # incorporate the genres variable to check if each movie falls into this category
+  left_join(select(movies, movieId, genres), by = "movieId") %>%
+  mutate(`drama movie` = str_detect(genres, "Drama")) %>%
+  # apply genre effect only to movies classified as drama
+  mutate(`genre effect (drama)` = saturation(`genre effect (drama)` * `drama movie` + saturation, 0.5, 5)) %>%
+  ungroup() %>%
+  summarise(rmse = sqrt(mean((rating - `genre effect (drama)`)^2)))
+
+# find best lambda
+lambda <- seq(22,38,1)
+res <- sapply(lambda, function(lambda){
+  predictions$train %>%
+    mutate(residue = rating - saturation) %>%
+    group_by(userId) %>%
+    summarise("user mean residue" = mean(residue),
+              .groups = 'drop')  %>%
+    select(userId,`user mean residue`) %>%
+    right_join(predictions$train, by = "userId") %>%
+    left_join(select(movies,movieId,genres), by = "movieId") %>%
+    filter(str_detect(genres, "Drama")) %>%
+    mutate(residue = rating - saturation) %>%
+    group_by(userId) %>%
+    summarise("user mean residue" = first(`user mean residue`),
+              "user mean residue (drama only)" = sum(residue)/(lambda + n()),
+              "genre effect (drama)" = `user mean residue (drama only)` - `user mean residue`,
+              "total drama movies" = n()) %>%
+    select(userId,`genre effect (drama)`) %>%
+    right_join(predictions$test, by = "userId") %>%
+    replace_na(list(`genre effect (drama)` = 0)) %>%
+    left_join(select(movies, movieId, genres), by = "movieId") %>% 
+    mutate(`drama movie` = str_detect(genres, "Drama")) %>% 
+    mutate(`genre effect (drama)` = saturation(`genre effect (drama)` * `drama movie` + saturation, 0.5, 5)) %>%
+    ungroup() %>%
+    summarise(rmse = sqrt(mean((rating - `genre effect (drama)`)^2))) %>% 
+    pull(rmse)
+})
+
+plot(lambda,res)
+
+data.frame(lambda = lambda[which.min(res)],
+           rmse = min(res))
+
+# optimal.lambda <- lambda[which.min(res)]
+# optimal.lambda <- data.frame("genre effect (drama)" = 26)
+# optimal.lambda <-
+#   optimal.lambda %>% 
+#   rename("genre effect (drama)" = "genre.effect..drama.")
+
+results
+
+# run predictions with selected lambda
+predictions$train <-
+  predictions$train %>%
+    mutate(residue = rating - saturation) %>%
+    group_by(userId) %>%
+    summarise("user mean residue" = mean(residue),
+              .groups = 'drop')  %>%
+    select(userId,`user mean residue`) %>%
+    right_join(predictions$train, by = "userId") %>%
+    left_join(select(movies,movieId,genres), by = "movieId") %>%
+    filter(str_detect(genres, "Drama")) %>%
+    mutate(residue = rating - saturation) %>%
+    group_by(userId) %>%
+    summarise("user mean residue" = first(`user mean residue`),
+              "user mean residue (drama only)" = sum(residue)/(optimal.lambda$`genre effect (drama)` + n()),
+              "genre effect (drama)" = `user mean residue (drama only)` - `user mean residue`,
+              "total drama movies" = n()) %>%
+    select(userId,`genre effect (drama)`) %>%
+    right_join(predictions$train, by = "userId") %>%
+    replace_na(list(`genre effect (drama)` = 0)) %>%
+    left_join(select(movies, movieId, genres), by = "movieId") %>% 
+    mutate(`drama movie` = str_detect(genres, "Drama")) %>% 
+    mutate(`genre effect (drama)` = saturation(`genre effect (drama)` * `drama movie` + saturation, 0.5, 5)) %>% 
+    select(userId,movieId,rating,`naive mean`,`simple movie effect`,
+           `regularized movie effect`,`regularized user effect`,`saturation`,`genre effect (drama)`)
+predictions$test <-
+    predictions$train %>%
+    mutate(residue = rating - saturation) %>%
+    group_by(userId) %>%
+    summarise("user mean residue" = mean(residue),
+              .groups = 'drop')  %>%
+    select(userId,`user mean residue`) %>%
+    right_join(predictions$train, by = "userId") %>%
+    left_join(select(movies,movieId,genres), by = "movieId") %>%
+    filter(str_detect(genres, "Drama")) %>%
+    mutate(residue = rating - saturation) %>%
+    group_by(userId) %>%
+    summarise("user mean residue" = first(`user mean residue`),
+              "user mean residue (drama only)" = sum(residue)/(optimal.lambda$`genre effect (drama)` + n()),
+              "genre effect (drama)" = `user mean residue (drama only)` - `user mean residue`,
+              "total drama movies" = n()) %>%
+    select(userId,`genre effect (drama)`) %>%
+    right_join(predictions$test, by = "userId") %>%
+    replace_na(list(`genre effect (drama)` = 0)) %>%
+    left_join(select(movies, movieId, genres), by = "movieId") %>% 
+    mutate(`drama movie` = str_detect(genres, "Drama")) %>% 
+    mutate(`genre effect (drama)` = saturation(`genre effect (drama)` * `drama movie` + saturation, 0.5, 5)) %>% 
+    select(userId,movieId,rating,`naive mean`,`simple movie effect`,
+           `regularized movie effect`,`regularized user effect`,`saturation`,`genre effect (drama)`)
+
+# calculate results on both the train and test sets
+results$train <-
+  results$train %>% 
+  bind_rows(data.frame(name = "genre effect (drama)",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`genre effect (drama)`),
+                       description = "+ genre effect (drama)"))
+results$test <-
+  results$test %>% 
+  bind_rows(data.frame(name = "genre effect (drama)",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`genre effect (drama)`),
+                       description = "+ genre effect (drama)"))
+
+  
+```
+
+- Great!
+- We could proceed with comedy, the next most frequent.
+- Is there a way to do the same for all genres at once?
+- The challenge is that some are highly correlated (children/animation, suspense/thriller etc). We risk correcting twice for the same things.
+- We now use principal component analysis on the movie genres, to get to PC which are uncorrelated combinations of the genres.
+
+### Genre effect through Principal Component Analysis (PCA)
+
+
+```{r find principal component decomposition for genres}
+
+# find principal components of movie genres
+genres$principal.components <- 
+  genres$wide %>% 
+  column_to_rownames("movieId") %>% 
+  prcomp()
+
+```
+
+```{r proof of concept - effect of 1st principal component}
+
+# get mean residue for each user
+predictions$train %>% 
+  select(userId,movieId,rating,saturation) %>% 
+  mutate(residue = rating - saturation) %>% 
+  group_by(userId) %>% 
+  # include 1st principal component for each movie
+  left_join(genres$principal.components$x %>% as.data.frame() %>% select(PC1) %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  replace_na(list(PC1 = 0)) %>% 
+  # calculate mean residue and weighted residue for each user
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(residue),
+            "PC1 weighted residue" = mean(PC1 * residue)) %>% 
+  # get discounted weighted residue per user
+  transmute(userId = userId,
+            "discounted PC1 mean residue" = `PC1 weighted residue` - `mean residue`) %>% 
+  # incorporate into predictions set
+  right_join(select(predictions$train,userId,movieId,rating,saturation),
+             by = "userId") %>% 
+  # incorporate PC1 value for each movie
+  left_join(genres$principal.components$x %>% as.data.frame() %>% select(PC1) %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  replace_na(list(PC1 = 0)) %>% 
+  # calculate PC1 effect and make predictions
+  mutate("PC1 effect" = saturation(`discounted PC1 mean residue` * `PC1` + saturation, 0.5, 5)) %>% 
+  # calculate RMSE
+  ungroup %>% 
+  summarise(rmse = RMSE(`PC1 effect`,rating))
+  
+
+
+```
+
+```{r effect of all genres (through PCA)}
+
+gc()
+
+predictions$train <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,saturation) %>%
+  transmute(userId,movieId,
+            residue = rating - saturation) %>% 
+  # include principal components for each movie
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  # calculate residue vs pc (stupid code, trying to reduce memory usage)
+  mutate(PC1 = PC1 * residue) %>% 
+  mutate(PC2 = PC2 * residue) %>% 
+  mutate(PC3 = PC3 * residue) %>% 
+  mutate(PC4 = PC4 * residue) %>% 
+  mutate(PC5 = PC5 * residue) %>% 
+  mutate(PC6 = PC6 * residue) %>% 
+  mutate(PC7 = PC7 * residue) %>% 
+  mutate(PC8 = PC8 * residue) %>% 
+  mutate(PC9 = PC9 * residue) %>% 
+  mutate(PC10 = PC10 * residue) %>%
+  mutate(PC11 = PC11 * residue) %>% 
+  mutate(PC12 = PC12 * residue) %>% 
+  mutate(PC13 = PC13 * residue) %>% 
+  mutate(PC14 = PC14 * residue) %>% 
+  mutate(PC15 = PC15 * residue) %>%
+  mutate(PC16 = PC16 * residue) %>% 
+  mutate(PC17 = PC17 * residue) %>% 
+  mutate(PC18 = PC18 * residue) %>% 
+  mutate(PC19 = PC19 * residue) %>% 
+  mutate(PC20 = PC20 * residue) %>% 
+  # residue and weighted residue per user
+  group_by(userId) %>% 
+  select(-movieId) %>% 
+  summarize(across(everything(),mean)) %>%  # lambda will go here
+  # subtract user mean residue
+  mutate(PC1 = PC1 - residue) %>% 
+  mutate(PC2 = PC2 - residue) %>% 
+  mutate(PC3 = PC3 - residue) %>% 
+  mutate(PC4 = PC4 - residue) %>% 
+  mutate(PC5 = PC5 - residue) %>% 
+  mutate(PC6 = PC6 - residue) %>% 
+  mutate(PC7 = PC7 - residue) %>% 
+  mutate(PC8 = PC8 - residue) %>% 
+  mutate(PC9 = PC9 - residue) %>% 
+  mutate(PC10 = PC10 - residue) %>%
+  mutate(PC11 = PC11 - residue) %>% 
+  mutate(PC12 = PC12 - residue) %>% 
+  mutate(PC13 = PC13 - residue) %>% 
+  mutate(PC14 = PC14 - residue) %>% 
+  mutate(PC15 = PC15 - residue) %>%
+  mutate(PC16 = PC16 - residue) %>% 
+  mutate(PC17 = PC17 - residue) %>% 
+  mutate(PC18 = PC18 - residue) %>% 
+  mutate(PC19 = PC19 - residue) %>% 
+  mutate(PC20 = PC20 - residue) %>% 
+  # incorporate user mean residue and weighted PC into predictions$train set
+  right_join(predictions$train,
+             by = "userId") %>% 
+  # incorporate pc for each movie from genres$principal.components$x set
+  left_join(genres$principal.components$x %>% 
+              as.data.frame() %>% 
+              rownames_to_column("movieId") %>% 
+              mutate(movieId = as.numeric(movieId)),
+            by = "movieId",
+            suffix = c(".user",".movie")) %>% 
+  # calculate pc effect and pc prediction
+  transmute(userId,movieId,rating,`naive mean`, `simple movie effect`, 
+            `regularized movie effect`,`regularized user effect`, `saturation`, `genre effect (drama)`,
+            "PC effect" = 
+              PC1.user * PC1.movie +
+              PC2.user * PC2.movie +
+              PC3.user * PC3.movie +
+              PC4.user * PC4.movie +
+              PC5.user * PC5.movie +
+              PC6.user * PC6.movie +
+              PC7.user * PC7.movie +
+              PC8.user * PC8.movie +
+              PC9.user * PC9.movie +
+              PC10.user * PC10.movie +
+              PC11.user * PC11.movie +
+              PC12.user * PC12.movie +
+              PC13.user * PC13.movie +
+              PC14.user * PC14.movie +
+              PC15.user * PC15.movie +
+              PC16.user * PC16.movie +
+              PC17.user * PC17.movie +
+              PC18.user * PC18.movie +
+              PC19.user * PC19.movie +
+              PC20.user * PC20.movie) %>% 
+  mutate("genre effect" = saturation(`PC effect` + saturation, 0.5, 5)) %>% 
+  select(-`PC effect`)
+
+gc()
+
+# MAKE PREDICTIONS FOR THE TEST SET
+
+predictions$test <-
+  predictions$train %>% 
+  select(userId,movieId,rating,saturation) %>%
+  transmute(userId,movieId,
+            residue = rating - saturation) %>% 
+  # include principal components for each movie
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  # calculate residue vs pc (stupid code, trying to reduce memory usage)
+  mutate(PC1 = PC1 * residue) %>% 
+  mutate(PC2 = PC2 * residue) %>% 
+  mutate(PC3 = PC3 * residue) %>% 
+  mutate(PC4 = PC4 * residue) %>% 
+  mutate(PC5 = PC5 * residue) %>% 
+  mutate(PC6 = PC6 * residue) %>% 
+  mutate(PC7 = PC7 * residue) %>% 
+  mutate(PC8 = PC8 * residue) %>% 
+  mutate(PC9 = PC9 * residue) %>% 
+  mutate(PC10 = PC10 * residue) %>%
+  mutate(PC11 = PC11 * residue) %>% 
+  mutate(PC12 = PC12 * residue) %>% 
+  mutate(PC13 = PC13 * residue) %>% 
+  mutate(PC14 = PC14 * residue) %>% 
+  mutate(PC15 = PC15 * residue) %>%
+  mutate(PC16 = PC16 * residue) %>% 
+  mutate(PC17 = PC17 * residue) %>% 
+  mutate(PC18 = PC18 * residue) %>% 
+  mutate(PC19 = PC19 * residue) %>% 
+  mutate(PC20 = PC20 * residue) %>% 
+  # residue and weighted residue per user
+  group_by(userId) %>% 
+  select(-movieId) %>% 
+  summarize(across(everything(),mean)) %>%  # lambda will go here
+  # subtract user mean residue
+  mutate(PC1 = PC1 - residue) %>% 
+  mutate(PC2 = PC2 - residue) %>% 
+  mutate(PC3 = PC3 - residue) %>% 
+  mutate(PC4 = PC4 - residue) %>% 
+  mutate(PC5 = PC5 - residue) %>% 
+  mutate(PC6 = PC6 - residue) %>% 
+  mutate(PC7 = PC7 - residue) %>% 
+  mutate(PC8 = PC8 - residue) %>% 
+  mutate(PC9 = PC9 - residue) %>% 
+  mutate(PC10 = PC10 - residue) %>%
+  mutate(PC11 = PC11 - residue) %>% 
+  mutate(PC12 = PC12 - residue) %>% 
+  mutate(PC13 = PC13 - residue) %>% 
+  mutate(PC14 = PC14 - residue) %>% 
+  mutate(PC15 = PC15 - residue) %>%
+  mutate(PC16 = PC16 - residue) %>% 
+  mutate(PC17 = PC17 - residue) %>% 
+  mutate(PC18 = PC18 - residue) %>% 
+  mutate(PC19 = PC19 - residue) %>% 
+  mutate(PC20 = PC20 - residue) %>% 
+  # incorporate user mean residue and weighted PC into predictions$test set
+  right_join(predictions$test,
+             by = "userId") %>% 
+  # incorporate pc for each movie from genres$principal.components$x set
+  left_join(genres$principal.components$x %>% 
+              as.data.frame() %>% 
+              rownames_to_column("movieId") %>% 
+              mutate(movieId = as.numeric(movieId)),
+            by = "movieId",
+            suffix = c(".user",".movie")) %>% 
+  # calculate pc effect and pc prediction
+  transmute(userId,movieId,rating,`naive mean`, `simple movie effect`, 
+            `regularized movie effect`,`regularized user effect`, `saturation`, `genre effect (drama)`,
+            "PC effect" = 
+              PC1.user * PC1.movie +
+              PC2.user * PC2.movie +
+              PC3.user * PC3.movie +
+              PC4.user * PC4.movie +
+              PC5.user * PC5.movie +
+              PC6.user * PC6.movie +
+              PC7.user * PC7.movie +
+              PC8.user * PC8.movie +
+              PC9.user * PC9.movie +
+              PC10.user * PC10.movie +
+              PC11.user * PC11.movie +
+              PC12.user * PC12.movie +
+              PC13.user * PC13.movie +
+              PC14.user * PC14.movie +
+              PC15.user * PC15.movie +
+              PC16.user * PC16.movie +
+              PC17.user * PC17.movie +
+              PC18.user * PC18.movie +
+              PC19.user * PC19.movie +
+              PC20.user * PC20.movie) %>% 
+  mutate("genre effect" = saturation(`PC effect` + saturation, 0.5, 5)) %>% 
+  select(-`PC effect`)
+
+# calculate results on both the train and test sets
+results$train <-
+  results$train %>% 
+  bind_rows(data.frame(name = "genre effect",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`genre effect`),
+                       description = "+ genre effect (all principal components)"))
+results$test <-
+  results$test %>% 
+  bind_rows(data.frame(name = "genre effect",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`genre effect`),
+                       description = "+ genre effect (all principal components)"))
+  
+
+```
+
+### Regularized genre effect
+
+```{r regularized genre effect}
+
+memory.limit(size = 15000)
+gc()
+
+lambda <- c(0,5,10,15,20,25,30)
+lambda <- 2:8
+lambda <- seq(5,7,.1)
+
+res <- sapply(lambda, function(lambda){
+  predictions$train %>% 
+    select(userId,movieId,rating,saturation) %>% 
+    left_join(genres$principal.components$x %>% as.data.frame() %>% 
+                rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+              by = "movieId") %>% 
+    transmute(userId,
+              residue = rating - saturation,
+              PC1 = PC1 * residue - residue,
+              PC2 = PC2 * residue - residue,
+              PC3 = PC3 * residue - residue,
+              PC4 = PC4 * residue - residue,
+              PC5 = PC5 * residue - residue,
+              PC6 = PC6 * residue - residue,
+              PC7 = PC7 * residue - residue,
+              PC8 = PC8 * residue - residue,
+              PC9 = PC9 * residue - residue,
+              PC10 = PC10 * residue - residue,
+              PC11 = PC11 * residue - residue,
+              PC12 = PC12 * residue - residue,
+              PC13 = PC13 * residue - residue,
+              PC14 = PC14 * residue - residue,
+              PC15 = PC15 * residue - residue,
+              PC16 = PC16 * residue - residue,
+              PC17 = PC17 * residue - residue,
+              PC18 = PC18 * residue - residue,
+              PC19 = PC19 * residue - residue,
+              PC20 = PC20 * residue - residue,) %>% 
+    # get mean residue and weighted residues for each PC for each user
+    group_by(userId) %>% 
+    summarise(PC1 = sum(PC1)/(lambda + n()),
+              PC2 = sum(PC2)/(lambda + n()),
+              PC3 = sum(PC3)/(lambda + n()),
+              PC4 = sum(PC4)/(lambda + n()),
+              PC5 = sum(PC5)/(lambda + n()),
+              PC6 = sum(PC6)/(lambda + n()),
+              PC7 = sum(PC7)/(lambda + n()),
+              PC8 = sum(PC8)/(lambda + n()),
+              PC9 = sum(PC9)/(lambda + n()),
+              PC10 = sum(PC10)/(lambda + n()),
+              PC11 = sum(PC11)/(lambda + n()),
+              PC12 = sum(PC12)/(lambda + n()),
+              PC13 = sum(PC13)/(lambda + n()),
+              PC14 = sum(PC14)/(lambda + n()),
+              PC15 = sum(PC15)/(lambda + n()),
+              PC16 = sum(PC16)/(lambda + n()),
+              PC17 = sum(PC17)/(lambda + n()),
+              PC18 = sum(PC18)/(lambda + n()),
+              PC19 = sum(PC19)/(lambda + n()),
+              PC20 = sum(PC20)/(lambda + n())) %>% 
+    # incorporate into the predictions$test object to make the predictions and calculate RMSE
+    right_join(select(predictions$test,userId,movieId,rating,saturation),
+               by = "userId") %>% 
+    # add principal components for each movie
+    left_join(genres$principal.components$x %>% as.data.frame() %>% 
+                rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+              by = "movieId",
+              suffix = c(".user",".movie")) %>% 
+    # calculate the regularized genre effect
+    transmute(userId,movieId,rating,saturation,
+              "regularized genre effect" = 
+                PC1.user*PC1.movie + PC2.user*PC2.movie + PC3.user*PC3.movie + PC4.user*PC4.movie + 
+                PC5.user*PC5.movie + PC6.user*PC6.movie + PC7.user*PC7.movie + PC8.user*PC8.movie +
+                PC9.user*PC9.movie + PC10.user*PC10.movie + PC11.user*PC11.movie + PC12.user*PC12.movie +
+                PC13.user*PC13.movie + PC14.user*PC14.movie + PC15.user*PC15.movie + PC16.user*PC16.movie +
+                PC17.user*PC17.movie + PC18.user*PC18.movie + PC19.user*PC19.movie + PC20.user*PC20.movie) %>% 
+    # calculate predictions
+    transmute(rating,
+              "regularized genre effect" = saturation(`regularized genre effect` + `saturation`, 0.5, 5)) %>% 
+    # calculate RMSE
+    ungroup %>% 
+    summarise(RMSE = sqrt(mean((`regularized genre effect` - rating)^2)))
+  
+})
+
+plot(lambda,res)
+# optimal.lambda = lambda[which.min(res)]
+
+# calculate predictions for the optimal value of lambda for the train set
+
+predictions$train <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,saturation) %>% 
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  transmute(userId,
+            residue = rating - saturation,
+            PC1 = PC1 * residue - residue,
+            PC2 = PC2 * residue - residue,
+            PC3 = PC3 * residue - residue,
+            PC4 = PC4 * residue - residue,
+            PC5 = PC5 * residue - residue,
+            PC6 = PC6 * residue - residue,
+            PC7 = PC7 * residue - residue,
+            PC8 = PC8 * residue - residue,
+            PC9 = PC9 * residue - residue,
+            PC10 = PC10 * residue - residue,
+            PC11 = PC11 * residue - residue,
+            PC12 = PC12 * residue - residue,
+            PC13 = PC13 * residue - residue,
+            PC14 = PC14 * residue - residue,
+            PC15 = PC15 * residue - residue,
+            PC16 = PC16 * residue - residue,
+            PC17 = PC17 * residue - residue,
+            PC18 = PC18 * residue - residue,
+            PC19 = PC19 * residue - residue,
+            PC20 = PC20 * residue - residue,) %>% 
+  # get mean residue and weighted residues for each PC for each user
+  group_by(userId) %>% 
+  summarise(PC1 = sum(PC1)/(optimal.lambda$`regularized genre effect` + n()),
+            PC2 = sum(PC2)/(optimal.lambda$`regularized genre effect` + n()),
+            PC3 = sum(PC3)/(optimal.lambda$`regularized genre effect` + n()),
+            PC4 = sum(PC4)/(optimal.lambda$`regularized genre effect` + n()),
+            PC5 = sum(PC5)/(optimal.lambda$`regularized genre effect` + n()),
+            PC6 = sum(PC6)/(optimal.lambda$`regularized genre effect` + n()),
+            PC7 = sum(PC7)/(optimal.lambda$`regularized genre effect` + n()),
+            PC8 = sum(PC8)/(optimal.lambda$`regularized genre effect` + n()),
+            PC9 = sum(PC9)/(optimal.lambda$`regularized genre effect` + n()),
+            PC10 = sum(PC10)/(optimal.lambda$`regularized genre effect` + n()),
+            PC11 = sum(PC11)/(optimal.lambda$`regularized genre effect` + n()),
+            PC12 = sum(PC12)/(optimal.lambda$`regularized genre effect` + n()),
+            PC13 = sum(PC13)/(optimal.lambda$`regularized genre effect` + n()),
+            PC14 = sum(PC14)/(optimal.lambda$`regularized genre effect` + n()),
+            PC15 = sum(PC15)/(optimal.lambda$`regularized genre effect` + n()),
+            PC16 = sum(PC16)/(optimal.lambda$`regularized genre effect` + n()),
+            PC17 = sum(PC17)/(optimal.lambda$`regularized genre effect` + n()),
+            PC18 = sum(PC18)/(optimal.lambda$`regularized genre effect` + n()),
+            PC19 = sum(PC19)/(optimal.lambda$`regularized genre effect` + n()),
+            PC20 = sum(PC20)/(optimal.lambda$`regularized genre effect` + n())) %>% 
+  # incorporate into the predictions$train object to make the predictions
+  right_join(select(predictions$train,userId,movieId,rating,saturation),
+             by = "userId") %>% 
+  # add principal components for each movie
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId",
+            suffix = c(".user",".movie")) %>% 
+  # calculate the regularized genre effect
+  transmute(userId,movieId,rating,saturation,
+            "regularized genre effect" = 
+              PC1.user*PC1.movie + PC2.user*PC2.movie + PC3.user*PC3.movie + PC4.user*PC4.movie + 
+              PC5.user*PC5.movie + PC6.user*PC6.movie + PC7.user*PC7.movie + PC8.user*PC8.movie +
+              PC9.user*PC9.movie + PC10.user*PC10.movie + PC11.user*PC11.movie + PC12.user*PC12.movie +
+              PC13.user*PC13.movie + PC14.user*PC14.movie + PC15.user*PC15.movie + PC16.user*PC16.movie +
+              PC17.user*PC17.movie + PC18.user*PC18.movie + PC19.user*PC19.movie + PC20.user*PC20.movie) %>% 
+  # calculate predictions
+  transmute(userId,movieId,rating,
+            "regularized genre effect" = saturation(`regularized genre effect` + `saturation`, 0.5, 5)) %>% 
+  # incorporate into predictions$train set
+  select(-rating) %>% 
+  right_join(predictions$train, by = c("userId","movieId")) %>% 
+  select(userId,movieId,rating,`naive mean`,`simple movie effect`,`regularized movie effect`,`regularized user effect`,
+         saturation, `genre effect (drama)`,`genre effect`,`regularized genre effect`)
+
+# calculate predictions for the optimal value of lambda for the test set
+
+predictions$test <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,saturation) %>% 
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  transmute(userId,
+            residue = rating - saturation,
+            PC1 = PC1 * residue - residue,
+            PC2 = PC2 * residue - residue,
+            PC3 = PC3 * residue - residue,
+            PC4 = PC4 * residue - residue,
+            PC5 = PC5 * residue - residue,
+            PC6 = PC6 * residue - residue,
+            PC7 = PC7 * residue - residue,
+            PC8 = PC8 * residue - residue,
+            PC9 = PC9 * residue - residue,
+            PC10 = PC10 * residue - residue,
+            PC11 = PC11 * residue - residue,
+            PC12 = PC12 * residue - residue,
+            PC13 = PC13 * residue - residue,
+            PC14 = PC14 * residue - residue,
+            PC15 = PC15 * residue - residue,
+            PC16 = PC16 * residue - residue,
+            PC17 = PC17 * residue - residue,
+            PC18 = PC18 * residue - residue,
+            PC19 = PC19 * residue - residue,
+            PC20 = PC20 * residue - residue,) %>% 
+  # get mean residue and weighted residues for each PC for each user
+  group_by(userId) %>% 
+  summarise(PC1 = sum(PC1)/(optimal.lambda$`regularized genre effect` + n()),
+            PC2 = sum(PC2)/(optimal.lambda$`regularized genre effect` + n()),
+            PC3 = sum(PC3)/(optimal.lambda$`regularized genre effect` + n()),
+            PC4 = sum(PC4)/(optimal.lambda$`regularized genre effect` + n()),
+            PC5 = sum(PC5)/(optimal.lambda$`regularized genre effect` + n()),
+            PC6 = sum(PC6)/(optimal.lambda$`regularized genre effect` + n()),
+            PC7 = sum(PC7)/(optimal.lambda$`regularized genre effect` + n()),
+            PC8 = sum(PC8)/(optimal.lambda$`regularized genre effect` + n()),
+            PC9 = sum(PC9)/(optimal.lambda$`regularized genre effect` + n()),
+            PC10 = sum(PC10)/(optimal.lambda$`regularized genre effect` + n()),
+            PC11 = sum(PC11)/(optimal.lambda$`regularized genre effect` + n()),
+            PC12 = sum(PC12)/(optimal.lambda$`regularized genre effect` + n()),
+            PC13 = sum(PC13)/(optimal.lambda$`regularized genre effect` + n()),
+            PC14 = sum(PC14)/(optimal.lambda$`regularized genre effect` + n()),
+            PC15 = sum(PC15)/(optimal.lambda$`regularized genre effect` + n()),
+            PC16 = sum(PC16)/(optimal.lambda$`regularized genre effect` + n()),
+            PC17 = sum(PC17)/(optimal.lambda$`regularized genre effect` + n()),
+            PC18 = sum(PC18)/(optimal.lambda$`regularized genre effect` + n()),
+            PC19 = sum(PC19)/(optimal.lambda$`regularized genre effect` + n()),
+            PC20 = sum(PC20)/(optimal.lambda$`regularized genre effect` + n())) %>% 
+  # incorporate into the predictions$test object to make the predictions
+  right_join(select(predictions$test,userId,movieId,rating,saturation),
+             by = "userId") %>% 
+  # add principal components for each movie
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId",
+            suffix = c(".user",".movie")) %>% 
+  # calculate the regularized genre effect
+  transmute(userId,movieId,rating,saturation,
+            "regularized genre effect" = 
+              PC1.user*PC1.movie + PC2.user*PC2.movie + PC3.user*PC3.movie + PC4.user*PC4.movie + 
+              PC5.user*PC5.movie + PC6.user*PC6.movie + PC7.user*PC7.movie + PC8.user*PC8.movie +
+              PC9.user*PC9.movie + PC10.user*PC10.movie + PC11.user*PC11.movie + PC12.user*PC12.movie +
+              PC13.user*PC13.movie + PC14.user*PC14.movie + PC15.user*PC15.movie + PC16.user*PC16.movie +
+              PC17.user*PC17.movie + PC18.user*PC18.movie + PC19.user*PC19.movie + PC20.user*PC20.movie) %>% 
+  # calculate predictions
+  transmute(userId,movieId,rating,
+            "regularized genre effect" = saturation(`regularized genre effect` + `saturation`, 0.5, 5)) %>% 
+  # incorporate into predictions$train set
+  select(-rating) %>% 
+  right_join(predictions$test, by = c("userId","movieId")) %>% 
+  select(userId,movieId,rating,`naive mean`,`simple movie effect`,`regularized movie effect`,`regularized user effect`,
+         saturation, `genre effect (drama)`,`genre effect`,`regularized genre effect`)
+
+
+# calculate results on both the train and test sets
+results$train <-
+  results$train %>% 
+  bind_rows(data.frame(name = "regularized genre effect",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`regularized genre effect`),
+                       description = "+ regularized genre effect (all principal components)"))
+results$test <-
+  results$test %>% 
+  bind_rows(data.frame(name = "regularized genre effect",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`regularized genre effect`),
+                       description = "+ regularized genre effect (all principal components)"))
+
+
+results
+
+# INCLUIR O EFEITO GENRE PC NO OBJETO USERS (COMPACTAR TUDO COMO STR E GUARDAR EM UMA COLUNA)
+
+# rm(temp,temp1,temp2)
+
+
+# update optimal.lambda object
+# optimal.lambda <- data.frame(`regularized genre effect` = lambda[which.min(res)])
+optimal.lambda <-
+  optimal.lambda %>% 
+  mutate("regularized genre effect" = 5.7)
+
+ 
+```
+
+In the training set, regularization actually worsens the results. Naturally, the average is the measure that minimizes deviation in each particular group, and regularization is an adjustment to the mean, so the result is not optimal on the set where the mean was calculated.
+
+```{r incorporate genre effect into users object}
+
+optimal.lambda.genre <- 5.7
+
+users <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,saturation) %>% 
+  left_join(genres$principal.components$x %>% as.data.frame() %>% 
+              rownames_to_column("movieId") %>% mutate(movieId = as.numeric(movieId)),
+            by = "movieId") %>% 
+  transmute(userId,
+            residue = rating - saturation,
+            PC1 = PC1 * residue - residue,
+            PC2 = PC2 * residue - residue,
+            PC3 = PC3 * residue - residue,
+            PC4 = PC4 * residue - residue,
+            PC5 = PC5 * residue - residue,
+            PC6 = PC6 * residue - residue,
+            PC7 = PC7 * residue - residue,
+            PC8 = PC8 * residue - residue,
+            PC9 = PC9 * residue - residue,
+            PC10 = PC10 * residue - residue,
+            PC11 = PC11 * residue - residue,
+            PC12 = PC12 * residue - residue,
+            PC13 = PC13 * residue - residue,
+            PC14 = PC14 * residue - residue,
+            PC15 = PC15 * residue - residue,
+            PC16 = PC16 * residue - residue,
+            PC17 = PC17 * residue - residue,
+            PC18 = PC18 * residue - residue,
+            PC19 = PC19 * residue - residue,
+            PC20 = PC20 * residue - residue,) %>% 
+  # get mean residue and weighted residues for each PC for each user
+  group_by(userId) %>% 
+  summarise(PC1 = sum(PC1)/(optimal.lambda$`regularized genre effect` + n()),
+            PC2 = sum(PC2)/(optimal.lambda$`regularized genre effect` + n()),
+            PC3 = sum(PC3)/(optimal.lambda$`regularized genre effect` + n()),
+            PC4 = sum(PC4)/(optimal.lambda$`regularized genre effect` + n()),
+            PC5 = sum(PC5)/(optimal.lambda$`regularized genre effect` + n()),
+            PC6 = sum(PC6)/(optimal.lambda$`regularized genre effect` + n()),
+            PC7 = sum(PC7)/(optimal.lambda$`regularized genre effect` + n()),
+            PC8 = sum(PC8)/(optimal.lambda$`regularized genre effect` + n()),
+            PC9 = sum(PC9)/(optimal.lambda$`regularized genre effect` + n()),
+            PC10 = sum(PC10)/(optimal.lambda$`regularized genre effect` + n()),
+            PC11 = sum(PC11)/(optimal.lambda$`regularized genre effect` + n()),
+            PC12 = sum(PC12)/(optimal.lambda$`regularized genre effect` + n()),
+            PC13 = sum(PC13)/(optimal.lambda$`regularized genre effect` + n()),
+            PC14 = sum(PC14)/(optimal.lambda$`regularized genre effect` + n()),
+            PC15 = sum(PC15)/(optimal.lambda$`regularized genre effect` + n()),
+            PC16 = sum(PC16)/(optimal.lambda$`regularized genre effect` + n()),
+            PC17 = sum(PC17)/(optimal.lambda$`regularized genre effect` + n()),
+            PC18 = sum(PC18)/(optimal.lambda$`regularized genre effect` + n()),
+            PC19 = sum(PC19)/(optimal.lambda$`regularized genre effect` + n()),
+            PC20 = sum(PC20)/(optimal.lambda$`regularized genre effect` + n())) %>% 
+  # join all genre effects into single variable
+  unite(-userId, col = "regularized genre effect", sep = "/") %>% 
+  right_join(users, by = "userId") %>% 
+  select(userId, `regularized user effect`, `regularized genre effect`)
+
+# comando para separar nas 20 colunas: (in a pipe)
+# separate(col = "regularized genre effect", into = paste("PC",1:20,sep=""),sep = "/",convert=TRUE)
+
+```
+
+### Effect of movie year and rating timestamp
+
+```{r date of release effect}
+
+sample.users.high.frequency <- 
+  predictions$train %>% 
+  group_by(userId) %>% 
+  summarise(n = n()) %>% 
+  filter(n >= 100) %>% 
+  sample_n(9) %>% 
+  pull(userId)
+
+predictions$train %>% 
+  # get mean residue for each user
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  transmute(userId,movieId,
+            residue = rating - `regularized genre effect`) %>% 
+  group_by(userId) %>% 
+  summarize("user mean residue" = mean(residue),
+            .groups = 'drop') %>% 
+  # get mean residue for user for each year of release
+  right_join(select(predictions$train,userId,movieId,rating,`regularized genre effect`),
+             by = 'userId') %>% 
+  transmute(userId,movieId,`user mean residue`,
+            residue = rating - `regularized genre effect`) %>% 
+  left_join(select(movies,movieId,year), by = "movieId") %>% 
+  transmute(userId, 
+            year = cut(year,
+                       right = TRUE,
+                       breaks = c(1915,seq(1970,2010,10)),
+                       dig.lab = 4),
+            "residue deviation" = residue - `user mean residue`) %>% 
+  group_by(userId,year) %>% 
+  summarize("mean residue deviation" = mean(`residue deviation`),
+            .groups = 'drop') %>% 
+  # take sample of users and plot results
+  filter(userId %in% sample.users.high.frequency) %>% 
+  ggplot(aes(x = year, y = `mean residue deviation`)) +
+  geom_point() +
+  facet_wrap(userId ~ .,ncol = 3) +
+  theme(axis.text.x = element_text(angle = 90))
+
+
+rm(sample.users.high.frequency)
+
+edx %>% 
+  select(year) %>% 
+  summary
+
+```
+
+```{r effect of years since release}
+
+# plot averages for each years since release
+age.effect <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(rating - `regularized genre effect`),
+            .groups = 'drop') %>% 
+  right_join(select(predictions$train,userId,movieId,rating,`regularized genre effect`),
+             by = 'userId') %>% 
+  left_join(select(train,userId,movieId,year,date),
+            by = c('userId','movieId')) %>% 
+  transmute(userId,movieId,
+            residue = rating - `regularized genre effect`,
+            "mean residue" = mean(residue),
+            "years since release" = if_else(year(date) - year >= 0,
+                                            year(date) - year,
+                                            0)) %>% 
+  group_by(`years since release`) %>% 
+  summarise("deviation from mean residue" = mean(residue - `mean residue`), # regularization goes here
+            "# of ratings" = n(),
+            "# of movies" = n_distinct(movieId))
+
+age.effect %>% 
+  ggplot(aes(x = `years since release`, y = `deviation from mean residue`, size = `# of ratings`)) +
+  geom_point() +
+  scale_x_continuous(trans = 'reverse',
+                     breaks = seq(0,100,10),
+                     minor_breaks = seq(0,100,5)) +
+  scale_size_continuous(name = "number of ratings",
+                        trans = "log10",
+                        range = c(0.5,4)) +
+  labs(title = "Mean residue vs years since movie release at time of rating",
+       x = "years since movie release",
+       y = "deviation from mean residue")
+
+
+```
+```{r proof of concept - prediction with age effect}
+
+# prediction on the train set
+predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  left_join(select(train,userId,movieId,year,date),
+            by = c("userId","movieId")) %>% 
+  transmute(rating, `regularized genre effect`,
+            "years since release" = if_else(year(date) - year >= 0,
+                                            year(date) - year,
+                                            0)) %>% 
+  left_join(select(age.effect,`years since release`,`deviation from mean residue`),
+            by = "years since release") %>% 
+  summarise(rmse = RMSE(rating, `regularized genre effect` + `deviation from mean residue`))
+
+# prediction on the test set
+predictions$test %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  left_join(select(test,userId,movieId,year,date),
+            by = c("userId","movieId")) %>% 
+  transmute(rating, `regularized genre effect`,
+            "years since release" = if_else(year(date) - year >= 0,
+                                            year(date) - year,
+                                            0)) %>% 
+  left_join(select(age.effect,`years since release`,`deviation from mean residue`),
+            by = "years since release") %>% 
+  summarise(rmse = RMSE(rating, `regularized genre effect` + `deviation from mean residue`))
+
+
+```
+
+```{r regularized age effect - find best lambda}
+
+lambda <- seq(0,300,10)
+
+res <- sapply(lambda,function(lambda){
+  age.effect <- 
+    predictions$train %>% 
+    select(userId,movieId,rating,`regularized genre effect`) %>% 
+    group_by(userId) %>% 
+    summarise("mean residue" = mean(rating - `regularized genre effect`),
+              .groups = 'drop') %>% 
+    right_join(select(predictions$train,userId,movieId,rating,`regularized genre effect`),
+               by = 'userId') %>% 
+    left_join(select(train,userId,movieId,year,date),
+              by = c('userId','movieId')) %>% 
+    transmute(userId,movieId,
+              residue = rating - `regularized genre effect`,
+              "mean residue" = mean(residue),
+              "years since release" = if_else(year(date) - year >= 0,
+                                              year(date) - year,
+                                              0)) %>% 
+    group_by(`years since release`) %>% 
+    summarise("age effect" = sum(residue - `mean residue`)/(lambda + n()), # regularization goes here
+              "# of ratings" = n(),
+              "# of movies" = n_distinct(movieId))
+  
+  predictions$test %>% 
+    select(userId,movieId,rating,`regularized genre effect`) %>% 
+    left_join(select(test,userId,movieId,year,date),
+              by = c("userId","movieId")) %>% 
+    transmute(rating, `regularized genre effect`,
+              "years since release" = if_else(year(date) - year >= 0,
+                                              year(date) - year,
+                                              0)) %>% 
+    left_join(select(age.effect,`years since release`,`age effect`),
+              by = "years since release") %>% 
+    summarise(rmse = RMSE(rating, saturation(`regularized genre effect` + `age effect`,.5,5))) %>% 
+    pull(rmse)
+})
+
+plot(lambda,res)
+
+optimal.lambda.age <- lambda[which.min(res)] # 260
+# optimal.lambda.age <- 260
+
+optimal.lambda <-
+  optimal.lambda %>% 
+  mutate("regularized age effect" = 260)
+
+
+```
+Best lambda is 260. Not much difference, very little significance. Few 'ages' have low number of ratings, and their significance is very low compared to those that appear very often. Not many groups, not terribly concentrated.
+
+```{r make predictions with best lambda}
+
+lambda <- 260
+
+age.effect <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(rating - `regularized genre effect`),
+            .groups = 'drop') %>% 
+  right_join(select(predictions$train,userId,movieId,rating,`regularized genre effect`),
+             by = 'userId') %>% 
+  left_join(select(train,userId,movieId,year,date),
+            by = c('userId','movieId')) %>% 
+  transmute(userId,movieId,
+            residue = rating - `regularized genre effect`,
+            "mean residue" = mean(residue),
+            "years since release" = if_else(year(date) - year >= 0,
+                                            year(date) - year,
+                                            0)) %>% 
+  group_by(`years since release`) %>% 
+  summarise("deviation from mean residue" = mean(residue - `mean residue`),
+            "regularized age effect" = sum(residue - `mean residue`)/(lambda + n()), # regularization goes here
+            "# of ratings" = n(),
+            "# of movies" = n_distinct(movieId))
+
+# plot graph - interesting to keep in report
+age.effect %>% 
+  ggplot(aes(x = `years since release`, y = `regularized age effect`, weight = `# of ratings`))+
+  geom_line()+
+  geom_line(aes(size = `# of ratings`),
+             color = 'gray', lineend = 'round') +
+  geom_point(aes(y = `deviation from mean residue`),
+             color = 'red') +
+  geom_smooth(span = 1.5,
+              level = 0) +
+  scale_x_continuous(trans = 'reverse')
+
+
+# make predictions on train set
+predictions$train <-
+  predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  left_join(select(train,userId,movieId,date), by = c('userId','movieId')) %>% 
+  left_join(select(movies,movieId,year), by = 'movieId') %>% 
+  mutate("years since release" = if_else(year(date) - year > 0,
+                                         year(date) - year, 0)) %>% 
+  left_join(select(age.effect,`years since release`, `regularized age effect`), by = "years since release") %>% 
+  transmute(userId,movieId,
+            "regularized age effect" = saturation(`regularized genre effect` + `regularized age effect`,.5,5)) %>% 
+  right_join(predictions$train, by = c('userId', 'movieId')) %>% 
+  select(userId,movieId,rating,
+         `naive mean`, 
+         `simple movie effect`,
+         `regularized movie effect`,
+         `regularized user effect`,
+         `saturation`,
+         `genre effect (drama)`,
+         `genre effect`,
+         `regularized genre effect`,
+         `regularized age effect`)
+
+# make predictions on test set
+predictions$test <-
+  predictions$test %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  left_join(select(test,userId,movieId,date), by = c('userId','movieId')) %>% 
+  left_join(select(movies,movieId,year), by = 'movieId') %>% 
+  mutate("years since release" = if_else(year(date) - year > 0,
+                                         year(date) - year, 0)) %>% 
+  left_join(select(age.effect,`years since release`, `regularized age effect`), by = "years since release") %>% 
+  transmute(userId,movieId,
+            "regularized age effect" = saturation(`regularized genre effect` + `regularized age effect`,.5,5)) %>% 
+  right_join(predictions$test, by = c('userId', 'movieId')) %>% 
+  select(userId,movieId,rating,
+         `naive mean`, 
+         `simple movie effect`,
+         `regularized movie effect`,
+         `regularized user effect`,
+         `saturation`,
+         `genre effect (drama)`,
+         `genre effect`,
+         `regularized genre effect`,
+         `regularized age effect`)
+
+# update results object
+results$train <-
+  results$train %>% 
+  bind_rows(data.frame(name = "regularized movie age effect",
+                       RMSE = RMSE(predictions$train$rating,
+                                   predictions$train$`regularized age effect`),
+                       description = "+ regularized age effect (years since release)"))
+results$test <-
+  results$test %>% 
+  bind_rows(data.frame(name = "regularized movie age effect",
+                       RMSE = RMSE(predictions$test$rating,
+                                   predictions$test$`regularized age effect`),
+                       description = "+ regularized age effect (years since release)"))
+  
+
+# results
+# rm(backup)
+# backup <- predictions
+
+```
+
+```{r smoothed age effect - interessante mas não melhorou o resultado}
+
+# predictions$train %>% 
+#   select(userId,movieId,rating,`regularized genre effect`) %>% 
+#   left_join(select(movies,movieId,year), by = "movieId") %>% 
+#   left_join(select(train,userId,movieId,date), by = c("userId","movieId")) %>% 
+#   mutate(residue = rating - `regularized genre effect`, 
+#          "mean residue" = mean(residue),
+#          "deviation from mean residue" = residue - `mean residue`,
+#          "years since release" = if_else(year(date) - year >= 0,
+#                                          year(date) - year, 0)) %>% 
+#   select(`years since release`, `deviation from mean residue`) %>% 
+#   sample_n(1000) %>% 
+#   ggplot(aes(`years since release`, y = `deviation from mean residue`)) +
+#   scale_x_continuous(trans = 'reverse') +
+#   geom_smooth(method = "loess")
+# 
+# loess(data = age.effect,
+#       formula = `regularized age effect` ~ `years since release`,
+#       # weights = `# of ratings`,
+#       degree = 1,
+#       span = 0.1) %>%
+#   predict(0:93) %>%
+#   as.data.frame() %>%
+#   mutate(years = 0:93) %>%
+#   rename('years' = 'years',
+#          'residue' = '.') %>%
+#   select(years, residue) %>%
+#   ggplot(aes(x = years, y = residue)) +
+#   geom_point() +
+#   scale_x_continuous(trans = 'reverse')
+#   
+# predictions$train %>% 
+#   select(userId,movieId,rating,`regularized genre effect`) %>% 
+#   left_join(select(movies,movieId,year), by = "movieId") %>% 
+#   left_join(select(train,userId,movieId,date), by = c("userId","movieId")) %>% 
+#   mutate(residue = rating - `regularized genre effect`, 
+#          "mean residue" = mean(residue),
+#          "deviation from mean residue" = residue - `mean residue`,
+#          "years since release" = if_else(year(date) - year >= 0,
+#                                          year(date) - year, 0)) %>% 
+#   select(`years since release`, `deviation from mean residue`) %>% 
+#   arrange(`years since release`) %>% 
+#   with(ksmooth(`years since release`, `deviation from mean residue`,
+#                x.points = 0:93,
+#                bandwidth = 5)) %>% 
+#   as.data.frame() %>% 
+#   ggplot(aes(x = x, y = y)) +
+#   geom_point() +
+#   scale_x_continuous(trans = 'reverse')
+# 
+# 
+# # predictions$train %>% 
+# #   select(userId,movieId,rating,`regularized genre effect`) %>% 
+# #   left_join(select(movies,movieId,year), by = "movieId") %>% 
+# #   left_join(select(train,userId,movieId,date), by = c("userId","movieId")) %>% 
+# #   mutate(residue = rating - `regularized genre effect`, 
+# #          "mean residue" = mean(residue),
+# #          "deviation from mean residue" = residue - `mean residue`,
+# #          "years since release" = if_else(year(date) - year >= 0,
+# #                                          year(date) - year, 0)) %>% 
+# #   select(`years since release`, `deviation from mean residue`) %>% 
+# #   arrange(`years since release`) %>% 
+# #   mutate(observation = 1:nrow(cur_data())) %>% 
+# #   with(ksmooth(`observation`, `deviation from mean residue`,
+# #                x.points = `observation`,
+# #                bandwidth = 1000000)) %>% 
+# #   as.data.frame() %>% 
+# #   ggplot(aes(x = x, y = y)) +
+# #   geom_point() +
+# #   scale_x_continuous(trans = 'reverse')
+#   
+# 
+# predictions$train %>%
+#   select(userId,movieId,rating,`regularized genre effect`) %>%
+#   left_join(select(movies,movieId,year), by = "movieId") %>%
+#   left_join(select(train,userId,movieId,date), by = c("userId","movieId")) %>%
+#   mutate(residue = rating - `regularized genre effect`,
+#          "mean residue" = mean(residue),
+#          "deviation from mean residue" = residue - `mean residue`,
+#          "years since release" = if_else(year(date) - year >= 0,
+#                                          year(date) - year, 0)) %>%
+#   select(`years since release`, `deviation from mean residue`) %>%
+#   arrange(`years since release`) %>%
+#   mutate(observation = 1:nrow(cur_data()))
+
+
+predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  left_join(select(train,userId,movieId,date), by = c("userId","movieId")) %>% 
+  left_join(select(movies,movieId,year), by = "movieId") %>% 
+  mutate(residue = rating - `regularized genre effect`,
+         "mean residue" = mean(residue),
+         "years since release" = if_else(year(date) - year > 0,
+                                         year(date) - year,
+                                         0)) %>% 
+  group_by(`years since release`) %>% 
+  summarise("deviation from mean" = mean(residue - `mean residue`),
+            "# of ratings" = n()) %>% 
+  mutate("trend" = predict(loess(data = mutate(cur_data(),
+                                               dev = `deviation from mean`,
+                                               years = `years since release`,
+                                               w = `# of ratings`),
+                                 formula = dev ~ years,
+                                 weights = w,
+                                 span = 1.5),
+                           `years since release`)) %>%
+  ggplot(aes(x = `years since release`,
+             y = `deviation from mean`)) +
+  geom_line(aes(size = `# of ratings`),
+            color = 'gray',
+            lineend = 'round') +
+  geom_point(color = 'red') +
+  geom_line(aes(y = `trend`),
+            color = 'blue') +
+  scale_x_continuous(trans = 'reverse') +
+  scale_size_binned(name = "yearly # of ratings",
+                    # trans = 'log10',
+                    range = c(.1,10)) +
+  labs(title = "Smooth trend of the effect of movie age at the time of rating",
+       x = "movie age",
+       y = "deviation from mean rating")
+
+```
+```{r find best span and lambda combination for age effect - interessante mas não melhorou o resultado}
+
+age <- 
+  predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  left_join(select(train,userId,movieId,date), by = c("userId","movieId")) %>% 
+  left_join(select(movies,movieId,year), by = "movieId") %>% 
+  mutate(residue = rating - `regularized genre effect`,
+         "mean residue" = mean(residue),
+         "years since release" = if_else(year(date) - year > 0,
+                                         year(date) - year,
+                                         0)) %>% 
+  group_by(`years since release`) %>% 
+  summarise("deviation from mean" = mean(residue - `mean residue`),
+            "# of ratings" = n())
+
+# X = c(.1,seq(.5,4,.5))
+# Y = seq(0,500,50)
+
+# outer(X = 1:2, # values of span for smoothing with loess
+#       Y = 0:1, # values of lambda for regularization
+#       FUN = function(span,lambda){
+#         print(span)
+#         print(lambda)
+#         
+#         effect <- 
+#           age %>% 
+#           mutate("trend" = predict(loess(data = mutate(cur_data(),
+#                                                        dev = `deviation from mean`,
+#                                                        years = `years since release`,
+#                                                        w = `# of ratings`),
+#                                          formula = dev ~ years,
+#                                          weights = w,
+#                                          span = span),
+#                                    `years since release`),
+#                  "age effect" = (`deviation from mean` - trend) * `# of ratings` / (`# of ratings` + lambda)) %>% 
+#           select(`years since release`, `age effect`)
+#         
+#         predictions$test %>% 
+#           select(userId,movieId,rating,`regularized genre effect`) %>% 
+#           left_join(select(test,userId,movieId,date), by = c('userId','movieId')) %>% 
+#           left_join(select(movies,movieId,year), by = 'movieId') %>% 
+#           mutate('years since release' = if_else(year(date) - year > 0,
+#                                                  year(date) - year,0)) %>% 
+#           left_join(effect, by = "years since release") %>% 
+#           mutate(prediction = saturation(`regularized genre effect` + `age effect`,.5,5)) %>% 
+#           summarise(rmse = RMSE(prediction, rating)) %>% 
+#           pull(rmse)
+#       })
+
+grid <- expand.grid(span = c(.1,seq(.5,4,.5)),
+                    lambda = seq(0,1000,100))
+
+res <- 
+  mapply(grid[,1], # values of span for smoothing with loess
+         grid[,2], # values of lambda for regularization
+         FUN = function(span,lambda){
+           effect <- 
+             age %>% 
+             mutate("trend" = predict(loess(data = mutate(cur_data(),
+                                                          dev = `deviation from mean`,
+                                                          years = `years since release`,
+                                                          w = `# of ratings`),
+                                            formula = dev ~ years,
+                                            weights = w,
+                                            span = span),
+                                      `years since release`),
+                    "age effect" = trend + (`deviation from mean` - trend) * `# of ratings` / (`# of ratings` + lambda)) %>% #
+             select(`years since release`, `age effect`)
+           
+           rmse <- 
+             predictions$test %>% 
+             select(userId,movieId,rating,`regularized genre effect`) %>% 
+             left_join(select(test,userId,movieId,date), by = c('userId','movieId')) %>% 
+             left_join(select(movies,movieId,year), by = 'movieId') %>% 
+             mutate('years since release' = if_else(year(date) - year > 0,
+                                                    year(date) - year,0)) %>% 
+             left_join(effect, by = "years since release") %>% 
+             mutate(prediction = saturation(`regularized genre effect` + `age effect`,.5,5)) %>% 
+             summarise(rmse = RMSE(prediction, rating)) %>% 
+             pull(rmse)
+           
+           paste("span:",span,"; lambda:",lambda,"; rmse=", rmse) %>% print()
+           rmse
+         })
+
+data.frame(grid,res) %>% 
+  ggplot(aes(x = lambda,y = res)) +
+  geom_point() +
+  facet_wrap(span ~ ., nrow = 3, scales = 'free')
+
+data.frame(grid,res) %>% 
+  pivot_wider(names_from = "lambda",
+              values_from = "res") %>% 
+  column_to_rownames('span') %>% 
+  as.matrix() %>% 
+  image()
+  
+data.frame(grid,res) %>% 
+  arrange(res)
+
+# plot best config:
+age %>% 
+  mutate("trend" = predict(loess(data = mutate(cur_data(),
+                                               dev = `deviation from mean`,
+                                               years = `years since release`,
+                                               w = `# of ratings`),
+                                 formula = dev ~ years,
+                                 weights = w,
+                                 span = 0.1),
+                           `years since release`),
+         "age effect" = (`deviation from mean` - trend) * `# of ratings` / (`# of ratings` + 1000)) %>% 
+  ggplot(aes(x = `years since release`)) +
+  geom_line(aes(y = `deviation from mean`), color = 'gray') +
+  geom_point(aes(y = `deviation from mean`, size = `# of ratings`), color = 'black') +
+  geom_point(aes(y = `deviation from mean`), color = 'red') +
+  geom_line(aes(y = trend), color = 'blue') +
+  geom_line(aes(y = trend + `age effect`), color = 'red') +
+  scale_x_reverse()
+
+
+.1,1000
+2,600,
+4,800
+
+
+rm(age)
+rm(span,lambda)
+rm(grid)
+
+
+```
+
+
+
+```{r effect of year of release on residue}
+
+# plot averages for each years since release
+predictions$train %>% 
+  select(userId,movieId,rating,`regularized genre effect`) %>% 
+  group_by(userId) %>% 
+  summarise("mean residue" = mean(rating - `regularized genre effect`),
+            .groups = 'drop') %>% 
+  right_join(select(predictions$train,userId,movieId,rating,`regularized genre effect`),
+             by = 'userId') %>% 
+  left_join(select(train,userId,movieId,year,date),
+            by = c('userId','movieId')) %>% 
+  transmute(userId,movieId,
+            residue = rating - `regularized genre effect`,
+            "year of release" = year) %>% 
+  group_by(`year of release`) %>% 
+  summarise("mean residue" = mean(residue),
+            n = n()) %>% 
+  ggplot(aes(x = `year of release`, y = `mean residue`, size = n)) +
+  geom_point() +
+  scale_size_continuous(name = "number of ratings",
+                        trans = "log10",
+                        range = c(0.5,4)) +
+  labs(title = "Mean residue vs year of release",
+       x = "year of release",
+       y = "mean residue")
+
+```
+
+### Collaborative filtering
+
+Final step.
+Already looked at relationships between columns for a single rating event - how does the movie average, user average, genre and age affect the rating.
+Now we look at how patterns emerging from the rest of the dataset can help predict each particular rating - how has this movie been evaluate by other similar users (user-based collaborative filtering)? How has this user rated similar movies (item-based collaborative filtering)?
+
+For this, we need to construct sparse matrices for the train and test sets (until we apply x-validation...). These matrices are huge, so we need to use sparse objects. Here, we will use the sparse matrix capabilities of the Matrix package.
+
+```{r collaborative filter - version 1}
+
+now()
+
+# # drop0
+# # zapsmall
+# # spMatrix
+# # nnzero
+# residuals@Dimnames
+# nnzero(residuals)
+
+# define correlation function for sparse matrices
+# sparse.cor <- function(x){
+#   n <- nrow(x)
+#   m <- ncol(x)
+#   ii <- unique(x@i)+1 # rows with a non-zero element
+# 
+#   Ex <- colMeans(x)
+#   nozero <- as.vector(x[ii,]) - rep(Ex,each=length(ii))        # colmeans
+# 
+#   covmat <- ( crossprod(matrix(nozero,ncol=m)) +
+#               crossprod(t(Ex))*(n-length(ii))
+#             )/(n-1)
+#   sdvec <- sqrt(diag(covmat))
+#   covmat/crossprod(t(sdvec))
+# }
+
+# create sparse matrix with all residuals from train set
+
+residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect`) %>% 
+  (function(df){sparseMatrix(i = df$userId,
+                             j = df$movieId,
+                             x = df$residual,
+                             dimnames = list(1:max(df$userId),
+                                             1:max(df$movieId)))})
+
+# create partitions of users and movies
+
+numUserPartitions <-  70
+numMoviePartitions <- 10
+# numUserPartitions <- 10000
+# numMoviePartitions <- 1000
+
+
+partitions <- list("users" = createFolds(y = users$userId,
+                                         k = numUserPartitions,
+                                         list = FALSE),
+                   "movies" = createFolds(y = movies$movieId,
+                                          k = numMoviePartitions,
+                                          list = FALSE))
+
+# create grid with users and movies partitions
+
+partitionGrid <- expand.grid(1:numUserPartitions,1:numMoviePartitions)
+# partitionGrid <- expand.grid(1:2,1:2)
+# partitionGrid <- expand.grid(1,1)
+
+# apply algorithm to grid and get results
+
+collaborative.effect <-
+  mapply(partitionGrid[,1],
+         partitionGrid[,2],
+         SIMPLIFY = FALSE,
+         FUN = function(userPartition,moviePartition){
+           
+           # print status
+           paste("user group: ",userPartition,"/",numUserPartitions,"; movie group: ",moviePartition,"/",
+                 numMoviePartitions," ; time: ", now()) %>% 
+             print()
+
+           # subset of the general matrix, with only the movies in the current partition
+           M <- residuals[,movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # subset of the general matrix, with only movies and users in the current partitions
+           U <- residuals[users$userId[which(partitions$users == userPartition)],
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # correlation between the users in the current partition and every other user
+           C <- sparse.correlation(t(M),t(U))
+           C[is.na(C)] <- 0
+
+           # predictions for the users in the current partition and movies in the current partition
+           Y <- t(crossprod(M,C)) / sparse.colSums(abs(C))
+           Y[is.na(Y)] <- 0
+
+           # check which entries in the test set will be filled with this user and movie partitions
+           prediction.grid <-
+             test %>%
+             select(userId,movieId) %>%
+             filter(userId %in% as.numeric(users$userId[which(partitions$users == userPartition)]),
+                    movieId %in% as.numeric(as.character(movies$movieId[which(partitions$movies == moviePartition)]))) %>%
+             as.matrix()
+
+           # add predictions from collaborative filter into prediction matrix
+           predictions.current.partition <- Y[matrix(as.character(prediction.grid), ncol = 2, byrow = FALSE)] %>% matrix(ncol = 1)
+           prediction.matrix <- matrix(c(prediction.grid,predictions.current.partition),byrow=FALSE,ncol=3)
+
+         })
+
+# apply algorithm in a loop
+
+# collaborative.effect <- matrix(ncol=3,nrow=0)
+# colnames(collaborative.effect) <- c("userId","movieId","collaborative filter")
+# 
+# 
+# userPartition <- 1
+# moviePartition <- 1
+
+# Y %>% glimpse
+# Y %>% range
+# sum(is.na(Y))
+# Y@x %>% hist
+# 
+# hist()C %>% abs %>% sparse.colSums %>% near(0) %>% sum        
+# sparseMatrix(i = 1:sum(partitions$users == userPartition),
+         #              j = 1:sum(partitions$movies == moviePartition),
+         #              x = Y[users$userId[which(partitions$users == userPartition)],
+         #                    movies$movieId[which(partitions$movies == moviePartition)]],
+         #              dimnames = list(users$userId[which(partitions$users == userPartition)],
+         #                              movies$movieId[which(partitions$movies == moviePartition)]))
+
+# results ("tidy" matrix)
+           # sparseMatrix(i = prediction.matrix[,1],
+           #              j = prediction.matrix[,2],
+           #              # x = Y[as.character(prediction.matrix[,1]),
+           #              #       as.character(prediction.matrix[,2])],
+           #              # x = Y[prediction.matrix[,1] + nrow(Y)*(prediction.matrix[,2]-1)],
+           #              x = Y[matrix(as.character(prediction.matrix),
+           #                           ncol = 2,
+           #                           byrow = FALSE)],
+           #              dimnames = list(users$userId[which(partitions$users == userPartition)],
+           #                              movies$movieId[which(partitions$movies == moviePartition)]))
+ # prediction.matrix <- bind_cols(prediction.grid, predictions)
+
+
+# collaborative.effect %>% glimpse
+# 
+# collaborative.effect[[1]] %>% head
+# 
+# # colnames(collaborative.effect[[4]]) <- NULL
+# 
+# do.call::bind_rows(collaborative.effect)
+# 
+# unlist(collaborative.effect)
+# c(collaborative.effect)
+
+collaborative.effect %>% 
+  plyr::rbind.fill.matrix() %>% 
+  as.data.frame() %>% 
+  transmute("userId" = `1`,
+            "movieId" = `2`,
+            "collaborative filter effect" = `3`) %>% 
+  left_join(select(predictions$test,userId,movieId,rating,`regularized age effect`),
+            by = c("userId","movieId")) %>%
+  mutate("collaborative filter" = saturation(`collaborative filter effect` + `regularized age effect`,.5,5)) %>%
+  summarise(rmse = RMSE(`collaborative filter`,rating))
+
+now()
+
+# RMSE = 0.8535589
+# 23h, 700 its, 1:50 min/it
+# all users, all movies
+# 70 user partitions, 10 movie partitions
+save(collaborative.effect,file = "collaborativeEffect001.RData")
+
+
+```
+
+
+
+```{r collaborative filter version 2}
+
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING
+
+
+residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect`) %>% 
+  (function(df){sparseMatrix(i = df$userId,
+                             j = df$movieId,
+                             x = df$residual,
+                             dimnames = list(1:max(df$userId),
+                                             1:max(df$movieId)))})
+
+# create partitions of users and movies
+
+numUsers <- 5000
+
+numUserPartitions <-  70
+numMoviePartitions <- 10
+# numUserPartitions <- 10000
+# numMoviePartitions <- 1000
+
+# only most active users will be used for calculating correlations
+mostActiveUsers <-
+  train %>%
+  group_by(userId) %>% 
+  summarise("number of ratings" = n(),
+            .groups = 'drop') %>% 
+  top_n(n = numUsers,
+        wt = `number of ratings`) %>% 
+  pull(userId)
+  
+
+partitions <- list("users" = createFolds(y = users$userId,
+                                         k = numUserPartitions,
+                                         list = FALSE),
+                   "movies" = createFolds(y = movies$movieId,
+                                          k = numMoviePartitions,
+                                          list = FALSE))
+
+# create grid with users and movies partitions
+
+partitionGrid <- expand.grid(1:numUserPartitions,1:numMoviePartitions)
+# partitionGrid <- expand.grid(1:2,1:2)
+# partitionGrid <- expand.grid(1,1)
+
+# apply algorithm to grid and get results
+
+collaborative.effect <-
+  mapply(partitionGrid[,1],
+         partitionGrid[,2],
+         SIMPLIFY = FALSE,
+         FUN = function(userPartition,moviePartition){
+           
+           # print status
+           paste("user group: ",userPartition,"/",numUserPartitions,"; movie group: ",moviePartition,"/",
+                 numMoviePartitions," ; time: ", now()) %>% 
+             print()
+
+           # subset of the general matrix, with only the movies in the current partition and the most active users
+           M <- residuals[mostActiveUsers,
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # subset of the general matrix, with only movies and users in the current partitions
+           U <- residuals[users$userId[which(partitions$users == userPartition)],
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # correlation between the users in the current partition and the most active users
+           C <- sparse.correlation(t(M),t(U))
+           C[is.na(C)] <- 0
+
+           # predictions for the users in the current partition and movies in the current partition
+           Y <- t(crossprod(M,C)) / sparse.colSums(abs(C))
+           Y[is.na(Y)] <- 0
+
+           # check which entries in the test set will be filled with this user and movie partitions
+           prediction.grid <-
+             test %>%
+             select(userId,movieId) %>%
+             filter(userId %in% as.numeric(users$userId[which(partitions$users == userPartition)]),
+                    movieId %in% as.numeric(as.character(movies$movieId[which(partitions$movies == moviePartition)]))) %>%
+             as.matrix()
+
+           # add predictions from collaborative filter into prediction matrix
+           predictions.current.partition <- Y[matrix(as.character(prediction.grid), ncol = 2, byrow = FALSE)] %>% matrix(ncol = 1)
+           prediction.matrix <- matrix(c(prediction.grid,predictions.current.partition),byrow=FALSE,ncol=3)
+
+         })
+
+
+collaborative.effect %>% 
+  plyr::rbind.fill.matrix() %>% 
+  as.data.frame() %>% 
+  transmute("userId" = `1`,
+            "movieId" = `2`,
+            "collaborative filter effect" = `3`) %>% 
+  left_join(select(predictions$test,userId,movieId,rating,`regularized age effect`),
+            by = c("userId","movieId")) %>%
+  mutate("collaborative filter" = saturation(`collaborative filter effect` + `regularized age effect`,.5,5)) %>%
+  summarise(rmse = RMSE(`collaborative filter`,rating))
+
+# RMSE = 0.8506942
+# 1:40h, 70*10=700 its, 7-10 sec/it
+# used for correlation: 5000 most active users
+# 70 user partitions, 10 movie partitions
+# save(collaborative.effect,file = "collaborativeEffect002.RData")
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / 
+
+
+```
+
+
+```{r collaborative filter version 3}
+
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING
+
+mean.residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect`) %>% 
+  group_by(userId) %>% 
+  summarise("mean residuals" = mean(residual),
+            .groups = 'drop')
+
+residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  left_join(mean.residuals, by = "userId") %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect` - `mean residuals`) %>% 
+  (function(df){sparseMatrix(i = df$userId,
+                             j = df$movieId,
+                             x = df$residual,
+                             dimnames = list(1:max(df$userId),
+                                             1:max(df$movieId)))})
+
+# rm(mean.residuals)
+
+# create partitions of users and movies
+
+numUsers <- 5000
+
+numUserPartitions <-  70
+numMoviePartitions <- 10
+# numUserPartitions <- 10000
+# numMoviePartitions <- 1000
+
+# only most active users will be used for calculating correlations
+mostActiveUsers <-
+  train %>%
+  group_by(userId) %>% 
+  summarise("number of ratings" = n(),
+            .groups = 'drop') %>% 
+  top_n(n = numUsers,
+        wt = `number of ratings`) %>% 
+  pull(userId)
+  
+
+partitions <- list("users" = createFolds(y = users$userId,
+                                         k = numUserPartitions,
+                                         list = FALSE),
+                   "movies" = createFolds(y = movies$movieId,
+                                          k = numMoviePartitions,
+                                          list = FALSE))
+
+# create grid with users and movies partitions
+
+partitionGrid <- expand.grid(1:numUserPartitions,1:numMoviePartitions)
+# partitionGrid <- expand.grid(1:2,1:2)
+# partitionGrid <- expand.grid(1,1)
+
+# apply algorithm to grid and get results
+
+collaborative.effect <-
+  mapply(partitionGrid[,1],
+         partitionGrid[,2],
+         SIMPLIFY = FALSE,
+         FUN = function(userPartition,moviePartition){
+           
+           # print status
+           paste("user group: ",userPartition,"/",numUserPartitions,"; movie group: ",moviePartition,"/",
+                 numMoviePartitions," ; time: ", now()) %>% 
+             print()
+
+           # subset of the general matrix, with only the movies in the current partition and the most active users
+           M <- residuals[mostActiveUsers,
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # subset of the general matrix, with only movies and users in the current partitions
+           U <- residuals[users$userId[which(partitions$users == userPartition)],
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # correlation between the users in the current partition and the most active users
+           C <- sparse.correlationCommonRows(t(M),t(U))
+           C[is.na(C)] <- 0
+
+           # predictions for the users in the current partition and movies in the current partition
+           Y <- t(crossprod(M,C)) / sparse.colSums(abs(C))
+           Y[is.na(Y)] <- 0
+
+           # check which entries in the test set will be filled with this user and movie partitions
+           prediction.grid <-
+             test %>%
+             select(userId,movieId) %>%
+             filter(userId %in% as.numeric(users$userId[which(partitions$users == userPartition)]),
+                    movieId %in% as.numeric(as.character(movies$movieId[which(partitions$movies == moviePartition)]))) %>%
+             as.matrix()
+
+           # add predictions from collaborative filter into prediction matrix
+           predictions.current.partition <- Y[matrix(as.character(prediction.grid), ncol = 2, byrow = FALSE)] %>% matrix(ncol = 1)
+           prediction.matrix <- matrix(c(prediction.grid,predictions.current.partition),byrow=FALSE,ncol=3)
+
+         })
+
+
+collaborative.effect %>% 
+  plyr::rbind.fill.matrix() %>% 
+  as.data.frame() %>% 
+  transmute("userId" = `1`,
+            "movieId" = `2`,
+            "collaborative filter effect" = `3`) %>% 
+  left_join(select(predictions$test,userId,movieId,rating,`regularized age effect`),
+            by = c("userId","movieId")) %>%
+  left_join(mean.residuals, by = "userId") %>% 
+  mutate("collaborative filter" = saturation(`collaborative filter effect` + `regularized age effect` + `mean residuals`,.5,5)) %>% # added mean residuals back!
+  summarise(rmse = RMSE(`collaborative filter`,rating))
+
+
+
+# RMSE = 0.8524083
+# 3:50h, 70*10=700 its, 18-20 sec/it
+# used for correlation: 5000 most active users
+# 70 user partitions, 10 movie partitions
+# same parameters as version 2, but using sparse.correlationCommonRows and normalizing the ratings object by removing each user's average residuals
+# save(collaborative.effect,file = "collaborativeEffect003.RData")
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / 
+
+
+```
+
+```{r collaborative filter version 4 - movie-based}
+
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING
+
+mean.residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect`) %>% 
+  group_by(userId) %>% 
+  summarise("mean residuals" = mean(residual),
+            .groups = 'drop')
+
+residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  left_join(mean.residuals, by = "userId") %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect` - `mean residuals`) %>% 
+  (function(df){sparseMatrix(i = df$userId,
+                             j = df$movieId,
+                             x = df$residual,
+                             dimnames = list(1:max(df$userId),
+                                             1:max(df$movieId)))})
+
+# rm(mean.residuals)
+
+# create partitions of users and movies
+
+numMovies <- 1000
+  
+numUserPartitions <-  7
+numMoviePartitions <- 10
+# numUserPartitions <- 10000
+# numMoviePartitions <- 1000
+
+# only most active users will be used for calculating correlations
+mostPopularMovies <-
+  train %>%
+  group_by(movieId) %>% 
+  summarise("number of ratings" = n(),
+            .groups = 'drop') %>% 
+  top_n(n = numMovies,
+        wt = `number of ratings`) %>% 
+  pull(movieId)
+  
+
+partitions <- list("users" = createFolds(y = users$userId,
+                                         k = numUserPartitions,
+                                         list = FALSE),
+                   "movies" = createFolds(y = movies$movieId,
+                                          k = numMoviePartitions,
+                                          list = FALSE))
+
+# create grid with users and movies partitions
+
+partitionGrid <- expand.grid(1:numUserPartitions,1:numMoviePartitions)
+# partitionGrid <- expand.grid(1:2,1:2)
+# partitionGrid <- expand.grid(1,1)
+
+# apply algorithm to grid and get results
+
+collaborative.effect <-
+  mapply(partitionGrid[,1],
+         partitionGrid[,2],
+         SIMPLIFY = FALSE,
+         FUN = function(userPartition,moviePartition){
+           
+           # print status
+           paste("user group: ",userPartition,"/",numUserPartitions,"; movie group: ",moviePartition,"/",
+                 numMoviePartitions," ; time: ", now()) %>% 
+             print()
+
+           # subset of the general matrix, with only the users in the current partition and the most popular movies
+           M <- residuals[users$userId[which(partitions$users == userPartition)],
+                          mostPopularMovies]
+
+           # subset of the general matrix, with only movies and users in the current partitions
+           U <- residuals[users$userId[which(partitions$users == userPartition)],
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # correlation between the movies in the current partition (U) and the most popular movies (M), as rated by users in current partition
+           C <- sparse.correlationCommonRows(M,U)
+           C[is.na(C)] <- 0
+
+           # predictions for the users in the current partition and movies in the current partition
+           Y <- t(t(M %*% C) / sparse.colSums(abs(C)))
+           Y[is.na(Y)] <- 0
+
+           # check which entries in the test set will be filled with this user and movie partitions
+           prediction.grid <-
+             test %>%
+             select(userId,movieId) %>%
+             filter(userId %in% as.numeric(users$userId[which(partitions$users == userPartition)]),
+                    movieId %in% as.numeric(as.character(movies$movieId[which(partitions$movies == moviePartition)]))) %>%
+             as.matrix()
+
+           # add predictions from collaborative filter into prediction matrix
+           predictions.current.partition <- Y[matrix(as.character(prediction.grid), ncol = 2, byrow = FALSE)] %>% matrix(ncol = 1)
+           prediction.matrix <- matrix(c(prediction.grid,predictions.current.partition),byrow=FALSE,ncol=3)
+
+         })
+
+
+collaborative.effect %>% 
+  plyr::rbind.fill.matrix() %>% 
+  as.data.frame() %>% 
+  transmute("userId" = `1`,
+            "movieId" = `2`,
+            "collaborative filter effect" = `3`) %>% 
+  left_join(select(predictions$test,userId,movieId,rating,`regularized age effect`),
+            by = c("userId","movieId")) %>%
+  left_join(mean.residuals, by = "userId") %>% 
+  mutate("collaborative filter" = saturation(`collaborative filter effect` + `regularized age effect` + `mean residuals`,.5,5)) %>% # added mean residuals back!
+  summarise(rmse = RMSE(`collaborative filter`,rating))
+
+
+
+# RMSE = 0.8487956
+# 53min, 7*10=70 its, 45 sec/it
+# used for correlation: 1000 most popular movies
+# 70 user partitions, 10 movie partitions
+# movie-based: at each partition, compare movies in partition with a selection of 1000 popular movies, prediction is based on how users rated these popular movies
+save(collaborative.effect,file = "collaborativeEffect004.RData")
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / 
+
+
+```
+
+```{r collaborative filter version 5 - movie-based - more movies}
+
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING / CHANGE THE NAME OF THE SAVE FILE BEFORE RUNNING
+
+mean.residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect`) %>% 
+  group_by(userId) %>% 
+  summarise("mean residuals" = mean(residual),
+            .groups = 'drop')
+
+residuals <-
+  train %>% 
+  left_join(select(predictions$train,userId,movieId,`regularized age effect`),
+            by = c("userId","movieId")) %>% 
+  left_join(mean.residuals, by = "userId") %>% 
+  transmute(userId,movieId, 
+            residual = rating - `regularized age effect` - `mean residuals`) %>% 
+  (function(df){sparseMatrix(i = df$userId,
+                             j = df$movieId,
+                             x = df$residual,
+                             dimnames = list(1:max(df$userId),
+                                             1:max(df$movieId)))})
+
+# rm(mean.residuals)
+
+# create partitions of users and movies
+
+numMovies <- 2000
+  
+numUserPartitions <-  7
+numMoviePartitions <- 10
+# numUserPartitions <- 10000
+# numMoviePartitions <- 1000
+
+# only most active users will be used for calculating correlations
+mostPopularMovies <-
+  train %>%
+  group_by(movieId) %>% 
+  summarise("number of ratings" = n(),
+            .groups = 'drop') %>% 
+  top_n(n = numMovies,
+        wt = `number of ratings`) %>% 
+  pull(movieId)
+  
+
+partitions <- list("users" = createFolds(y = users$userId,
+                                         k = numUserPartitions,
+                                         list = FALSE),
+                   "movies" = createFolds(y = movies$movieId,
+                                          k = numMoviePartitions,
+                                          list = FALSE))
+
+# create grid with users and movies partitions
+
+partitionGrid <- expand.grid(1:numUserPartitions,1:numMoviePartitions)
+# partitionGrid <- expand.grid(1:2,1:2)
+# partitionGrid <- expand.grid(1,1)
+
+# apply algorithm to grid and get results
+
+collaborative.effect <-
+  mapply(partitionGrid[,1],
+         partitionGrid[,2],
+         SIMPLIFY = FALSE,
+         FUN = function(userPartition,moviePartition){
+           
+           # print status
+           paste("user group: ",userPartition,"/",numUserPartitions,"; movie group: ",moviePartition,"/",
+                 numMoviePartitions," ; time: ", now()) %>% 
+             print()
+
+           # subset of the general matrix, with only the users in the current partition and the most popular movies
+           M <- residuals[users$userId[which(partitions$users == userPartition)],
+                          mostPopularMovies]
+
+           # subset of the general matrix, with only movies and users in the current partitions
+           U <- residuals[users$userId[which(partitions$users == userPartition)],
+                          movies$movieId[which(partitions$movies == moviePartition)]]
+
+           # correlation between the movies in the current partition (U) and the most popular movies (M), as rated by users in current partition
+           C <- sparse.correlationCommonRows(M,U)
+           C[is.na(C)] <- 0
+
+           # predictions for the users in the current partition and movies in the current partition
+           Y <- t(t(M %*% C) / sparse.colSums(abs(C)))
+           Y[is.na(Y)] <- 0
+
+           # check which entries in the test set will be filled with this user and movie partitions
+           prediction.grid <-
+             test %>%
+             select(userId,movieId) %>%
+             filter(userId %in% as.numeric(users$userId[which(partitions$users == userPartition)]),
+                    movieId %in% as.numeric(as.character(movies$movieId[which(partitions$movies == moviePartition)]))) %>%
+             as.matrix()
+
+           # add predictions from collaborative filter into prediction matrix
+           predictions.current.partition <- Y[matrix(as.character(prediction.grid), ncol = 2, byrow = FALSE)] %>% matrix(ncol = 1)
+           prediction.matrix <- matrix(c(prediction.grid,predictions.current.partition),byrow=FALSE,ncol=3)
+
+         })
+
+
+collaborative.effect %>% 
+  plyr::rbind.fill.matrix() %>% 
+  as.data.frame() %>% 
+  transmute("userId" = `1`,
+            "movieId" = `2`,
+            "collaborative filter effect" = `3`) %>% 
+  left_join(select(predictions$test,userId,movieId,rating,`regularized age effect`),
+            by = c("userId","movieId")) %>%
+  left_join(mean.residuals, by = "userId") %>% 
+  mutate("collaborative filter" = saturation(`collaborative filter effect` + `regularized age effect` + `mean residuals`,.5,5)) %>% # added mean residuals back!
+  summarise(rmse = RMSE(`collaborative filter`,rating))
+
+
+
+# RMSE = 0.8514526
+# 93min, 7*10=70 its, 1:25 min/it
+# used for correlation: 2000 most popular movies
+# 70 user partitions, 10 movie partitions
+# movie-based: at each partition, compare movies in partition with a selection of 1000 popular movies, prediction is based on how users rated these popular movies
+save(collaborative.effect,file = "collaborativeEffect005.RData")
+
+# CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / CHANGE THE NAME OF THE SAVE FILE BEFORE SAVING / 
+
+
+```
+
+
+
+
+### How many 5 stars ????
+
+```{r TEMP - how many five stars}
+
+predictions$train %>% 
+  group_by(userId) %>% 
+  summarize("# of ratings" = n(),
+            "# of 5 stars - real" = sum(rating == 5),
+            "proportion of 5 stars - real" = mean(rating == 5),
+            "# of 5 stars - prediction" = sum(`regularized genre effect` == 5),
+            "proportion of 5 stars - prediction" = mean(`regularized genre effect` == 5)) %>% 
+  filter(`# of ratings` >= 100)
+
+```
+
+### Effect of number of ratings and ratings per year
+
+
+### Effect of movie genres - GARBAGE
+
+Users tend to be partial towards certain movie categories. We'll look at the residuals:
+
+DEFINIR LAMBDA COM X-VALIDATION OU BOOTSTRAPPING
+AQUI TAMBÉM DÁ PRA REGULARIZAR
+
+```{r GARBAGE residuals vs movie genres}
+
+movie_genres <- 
+  edx %>% 
+  select(-userId,-rating,-title,-year,-date,-time) %>% 
+  group_by(movieId) %>% 
+  summarize(across(.cols = everything(),
+                   .fns = first),
+            .groups = 'drop') %>% 
+  pivot_longer(cols = -movieId,
+               names_to = "genre",
+               values_to = "logical") %>% 
+  filter(logical == TRUE) %>% 
+  select(-logical)
+
+residue <-
+  predictions_train %>% 
+  select(userId,movieId,rating,`+ reg. user effect`) %>% 
+  mutate(residue = rating - `+ reg. user effect`) %>% 
+  select(-`+ reg. user effect`)
+
+residue_genre <-
+  left_join(residue,movie_genres, by = "movieId") %>% 
+  group_by(userId, genre) %>% 
+  summarize("mean residue" = mean(residue),
+            .groups = 'drop') %>% 
+  pivot_wider(values_from = "mean residue",
+              names_from = "genre") %>% 
+  mutate(across(.cols = -userId,
+                .fns = function(res){if_else(is.na(res), 0, res)})) %>% 
+  select(-`NA`)
+
+
+lambda <- 3
+
+residue_genre_regularized <-
+  left_join(residue,movie_genres, by = "movieId") %>% 
+  group_by(userId, genre) %>% 
+  summarize("reg mean residue" = sum(residue)/(lambda + n()),
+            .groups = 'drop') %>% 
+  pivot_wider(values_from = "reg mean residue",
+              names_from = "genre") %>% 
+  mutate(across(.cols = -userId,
+                .fns = function(res){if_else(is.na(res), 0, res)})) %>% 
+  select(-`NA`)
+
+
+# pc <-
+#   residue_genre %>%
+#   select(-userId) %>%
+#   prcomp()
+# 
+# 
+# summary(pc)
+# summary(residue_genre)
+# 
+# pc
+# 
+# pc$x
+# 
+# 
+# data.frame(userId = residue_genre$userId,
+#            pc$x) %>% 
+#   sample_n(1000) %>% 
+#   ggplot(aes(x = PC1, y = PC2)) +
+#   geom_point() +
+#   coord_fixed(ratio = 1)
+
+
+# users clusters according to genre
+genres_clusters <- 
+  residue_genre %>% 
+  column_to_rownames(var = "userId") %>% 
+  kmeans(centers = 3, nstart = 5)
+
+genres_clusters 
+summary(genres_clusters)
+
+genres_clusters %>% glimpse
+
+genres_clusters$cluster
+
+genres_clusters %>% class
+
+fitted(genres_clusters)[2,]
+
+genres_clusters$centers[3,]
+
+
+
+# heatmap
+profiles <- 
+  residue_genre %>% 
+  column_to_rownames(var = "userId") %>% 
+  kmeans(centers = 50, nstart = 1)
+
+profiles$centers %>% 
+  heatmap(col = RColorBrewer::brewer.pal(11, "Spectral"))
+
+profiles$withinss
+glimpse(profiles)
+
+
+
+
+
+
+```
+
+```{r residuals vs movie genres}
+
+# tidy object with entries for movie/genres pairs
+movie_genres <- 
+  edx %>% 
+  select(-userId,-rating,-title,-year,-date,-time) %>% 
+  group_by(movieId) %>% 
+  summarize(across(.cols = everything(),
+                   .fns = first),
+            .groups = 'drop') %>% 
+  pivot_longer(cols = -movieId,
+               names_to = "genre",
+               values_to = "logical") %>% 
+  filter(logical == TRUE) %>% 
+  select(-logical)
+
+# residue and rating for each user/movie pair
+residue <-
+  predictions_train %>% 
+  select(userId,movieId,rating,`+ reg. user effect`) %>% 
+  mutate(residue = rating - `+ reg. user effect`) %>% 
+  select(-`+ reg. user effect`)
+
+# mean residue for each user according to genre
+residue_genre <-
+  left_join(residue,movie_genres, by = "movieId") %>% 
+  group_by(userId, genre) %>% 
+  summarize("mean residue" = mean(residue),
+            .groups = 'drop') %>% 
+  pivot_wider(values_from = "mean residue",
+              names_from = "genre") %>% 
+  mutate(across(.cols = -userId,
+                .fns = function(res){if_else(is.na(res), 0, res)})) %>% 
+  select(-`NA`)
+
+# principal components of the residue according to genre
+pc <- residue_genre %>% 
+  column_to_rownames("userId") %>% 
+  prcomp()
+
+# users and principal components of the residue
+residue_pc <- 
+  pc$x %>% 
+  as.data.frame() %>% 
+  rownames_to_column("userId")
+
+# user groups according to principal component
+k <- 
+  residue_pc %>% 
+  column_to_rownames("userId") %>% 
+  as.matrix() %>% 
+  kmeans(centers = 20, iter = 50)
+
+# heatmap
+k$centers %>% 
+  as.matrix() %>% 
+  heatmap()
+
+# movies and principal components
+movies_pc <- 
+  movie_genres %>% 
+  mutate(logical = TRUE) %>% 
+  pivot_wider(names_from = "genre",
+              values_from = "logical",
+              values_fill = FALSE) %>% 
+  column_to_rownames("movieId") %>% 
+  as.matrix() %*% pc$rotation
+
+
+
+
+
+# rm(residue,
+#    residue_genre,
+#    pc,
+#    residue_pc,
+#    movies_pc)
+
+```
+
+
+```{r}
+
+# individual genres combinations and principal components
+genres_pc <-
+  backup_edx %>% # usar outra variável aqui (não expandir coluna genres em edx e outros objetos)
+  select(genres) %>% 
+  group_by(genres) %>% 
+  summarize(count = n(),
+            .groups = 'drop') %>% 
+  arrange(desc(count)) %>% 
+  separate(col = genres,
+           into = paste("genre ",1:max_genres),
+           sep = "\\|",
+           fill = "right",
+           remove = FALSE) %>%
+  pivot_longer(cols = c(-genres,-count),
+               names_to = "genre #",
+               values_to = "genre",
+               values_drop_na = TRUE) %>%
+  select(-`genre #`) %>%
+  filter(genre != "(no genres listed)") %>% 
+  mutate(true = TRUE) %>% 
+  pivot_wider(names_from = genre,
+              values_from = true,
+              values_fill = FALSE) %>% 
+  select(-count) %>% 
+  column_to_rownames("genres") %>% 
+  as.matrix() %*% pc$rotation
+
+
+
+
+# rm(genres_pc)
+
+```
+
+```{r user groups and residue for each genre pc}
+
+# user groups and genres
+users_genres <- expand.grid("user group" = rownames(k$centers),
+                            "genres" = rownames(genres_pc))
+
+# user groups and genre principal components
+users_groups_pc <- 
+  users_genres %>% 
+  left_join(rownames_to_column(data.frame(genres_pc),"genres"),
+            by = "genres") %>% 
+  unite("user group", "genres",
+        col = "group / genres",
+        sep = "/",
+        remove = TRUE) %>% 
+  column_to_rownames("group / genres")
+  
+# genre effect for each user group / genres combination
+e_genre_usergroup <-
+  k$centers %*% t(genres_pc) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "user group") %>% 
+  pivot_longer(cols = -`user group`,
+               names_to = "genres",
+               values_to = "genres effect") %>% 
+  mutate(`user group` = as.integer(`user group`))
+
+summary(e_genre_usergroup)
+glimpse(e_genre_usergroup)
+
+head(e_genre_usergroup,50)
+
+# 
+# rm(users_genres,
+#    users_groups_pc)
+
+```
+
+```{r make prediction with genre effect}
+
+# user to cluster correspondence data frame
+user_clusters <- 
+  data.frame(k$cluster) %>% 
+  rownames_to_column("userId") %>% 
+  mutate(userId = as.integer(userId)) %>% 
+  rename("user group" = "k.cluster")
+
+# movies and genres
+movies_genres <- 
+  backup_edx %>% 
+  group_by(movieId) %>% 
+  summarize(genres = first(genres),
+            .groups = 'drop')
+
+
+
+# CORRIGIR ISSO NA ORIGEM
+e_genre_usergroup <-
+  e_genre_usergroup %>% 
+  mutate("user group" = as.integer(`user group`))
+
+
+
+# add columns to predictions
+predictions_train <-
+  predictions_train %>% 
+  # select(userId, movieId, `+ reg. user effect`) %>% 
+  left_join(movies_genres,
+            by = "movieId") %>% 
+  left_join(user_clusters,
+            by = "userId") %>%   # find user group for each user
+  left_join(e_genre_usergroup, 
+            by = c("user group", "genres")) %>%   # find genre effect for each user group / genres combination
+  mutate("+ genre effect" = `+ reg. user effect` - `genres effect`) %>% 
+  replace_na(list(`+ genre effect` = 0)) %>% 
+  select(- genres, -`user group`, -`genres effect`)
+
+predictions_test <-
+  predictions_test %>% 
+  # select(userId, movieId, `+ reg. user effect`) %>% 
+  left_join(movies_genres,
+            by = "movieId") %>% 
+  left_join(user_clusters,
+            by = "userId") %>%   # find user group for each user
+  left_join(e_genre_usergroup, 
+            by = c("user group", "genres")) %>%   # find genre effect for each user group / genres combination
+  mutate("+ genre effect" = `+ reg. user effect` - `genres effect`) %>% 
+  replace_na(list(`+ genre effect` = 0)) %>% 
+  select(- genres, -`user group`, -`genres effect`)
+
+
+
+# COLOQUEI - NA LINHA 1457 SÓ PRA VER SE TINHA ERRADO O SINAL, ARRUMAR SE DER MERDA!!!
+# O RESULTADO FICOU MELHOR COM O -, MAS AINDA PIOR DO QUE SEM USAR ESTE EFEITO
+
+
+# OLHAR O QUE ACONTECE TROCANDO O SINAL EM PRED_TRAIN
+
+
+# update results object
+results <-
+  bind_rows(results, data.frame(name = "+ genre effect",
+                                RMSE = RMSE(predictions_test$`+ genre effect`, predictions_test$rating),
+                                description = "prediction includes effects for movies, users and genres"))
+
+results
+
+summary(predictions_test)
+
+saturate <- function(x,xmin,xmax){
+  sapply(x,function(x){
+    if (x < xmin) {x = xmin}
+    if (x > xmax) {x = xmax}
+    x
+  })
+}
+
+saturate(-1:6,0,5)
+
+RMSE(saturate(predictions_test$`+ genre effect`,0,5), predictions_test$rating)
+RMSE(predictions_test$`+ genre effect`, predictions_test$rating)
+
+
+RMSE(saturate(predictions_test$`+ reg. user effect`,0,5), predictions_test$rating)
+RMSE(predictions_test$`+ reg. user effect`, predictions_test$rating)
+
+
+```
+
+
+```{r GARBAGE}
+
+# # users and principal components (based on their groups)
+# users_pc <- 
+#   data.frame(userId = residue_pc$userId,
+#              fitted(k)) %>% 
+#   remove_rownames() %>% 
+#   column_to_rownames"userId") %>% 
+#   as.matrix
+
+
+genre_residue_values <- 
+  sapply(1:nrow(train),
+         function(i){
+           user <- train$userId[i] %>% as.character
+           movie <- train$movieId[i] %>% as.character
+           if (user %in% rownames(users_pc) & movie %in% rownames(movies_pc)) 
+           {users_pc[user,] %*% movies_pc[movie,]} 
+           else {0}
+         })
+
+genre_residue <- 
+  data.frame(userId = train$userId,
+             movieId = train$movieId,
+             "genre residue" = gente_residue_values)
+  
+genre_residue %>% glimpse
+genre_residue %>% summary
+
+```
+
+The model we want to define to capture this:
+
+$Y = \mu + e_m^r + e_u^r+ \sum_{g=1}^{n} e_g^r + \epsilon$
+
+where:
+$\mu$ = mean global rating
+$e_m^r$ = regularized movie effect 
+$e_u^r$ = regularized movie effect 
+$e_g^r$ = regularized genre effect for each genre
+$\epsilon$ = random residue
+
+
+
+### Defining groups of users
+
+Users partial to movie categories which are not captured in the dataset, but which reveal themselves through patterns in the residuals.
+
+In theory, we could set up a matrix with lines for users and columns for movies and use principal component analysis, single value decomposition or a clusterization algorithm to identify groups, but this matrix would be so sparse in big that this approach is impractical in a personal computer. Thus, we choose to construct a matrix with all the users and a selection of the movies to try and find patterns.
+
+Two different approaches:
+
+1. Using a random sample of all the movies
+2. Grouping according to a selection of the most often rated movies
+
+We choose to go with option 2 because we expect these movies to continue to be rated more often in the future. It is also more similar to what we would do intuitively, we tend to group according to our feelings about the most prominent cultural objects. However, it is possible that a bias is present, as movies rated more often tend to be of a higher quality, they are not uniformly distributed.
+
+We also use another clusterization technique which came for free in the dataset - the movie genres.
+
+We'll not look at the totals, but rather at the residuals.
+
+```{r }
+
+
+
+
+```
+
+
+
+
+
+
+### Most active users and most rated movies
+
+```{r most active users and most rated movies}
+
+active_users <- 
+  edx %>% 
+  group_by(userId) %>% 
+  summarize(ratings = n(),
+            .groups = 'drop') %>% 
+  top_n(100, wt = ratings) %>% 
+  arrange(desc(ratings)) %>% 
+  pull(userId)
+
+frequent_movies <- 
+  edx %>% 
+  group_by(movieId) %>% 
+  summarize(ratings = n(),
+            .groups = 'drop') %>% 
+  top_n(100, wt = ratings) %>% 
+  arrange(desc(ratings)) %>% 
+  pull(movieId)
+
+pc <-
+  edx %>% 
+  filter(userId %in% active_users,
+         movieId %in% frequent_movies) %>% 
+  select(userId,movieId,rating) %>% 
+  pivot_wider(names_from = "movieId",
+              values_from = "rating") %>% 
+  prcomp()
+
+pc_na <-
+  edx %>% 
+  filter(userId %in% active_users,
+         movieId %in% frequent_movies) %>% 
+  select(userId,movieId,rating) %>% 
+  mutate(rating = 1) %>% 
+  pivot_wider(names_from = "movieId",
+              values_from = "rating",
+              values_fill = 0) %>% 
+  prcomp()
+
+
+summary(pc_na)
+
+image(pc_na$x)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+### Date of rating effect
+
+Does the time since movie release influence its rating? Do some movies age better than others?
+We evaluate the residue to find out.
+
+```{r effect of years since release on residue}
+
+
+
+
+
+
+```
+
+
+### Rounding to integer
+
+Finally, we recognize that fact that users tend to favor an integer number of stars, so we round our prediction up or down
+
+```{r rating vs prediction}
+
+# predictions_test %>% 
+#   sample_n(10000) %>% 
+#   ggplot(aes(x = `+ reg. user effect`,
+#              y = rating)) +
+#   geom_point(alpha = .005)
+
+qts <- seq(0,1,.01)
+q_prediction <- quantile(predictions_test$`+ reg. user effect`, qts)
+q_rating <- quantile(predictions_test$rating, qts)
+
+data.frame(p = q_prediction,
+           r = q_rating) %>% 
+  ggplot(aes(x = q_prediction,
+             y = q_rating)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(0,5,.5),
+                     minor_breaks = NULL) +
+  scale_y_continuous(breaks = seq(0,5,.5),
+                     minor_breaks = NULL) +
+  geom_abline(slope = 1, intercept = 0, color = 'blue')
+
+RMSE(predictions_test$`+ reg. user effect`,
+     predictions_test$rating)
+
+RMSE(round(predictions_test$`+ reg. user effect`,0),
+     predictions_test$rating)
+
+RMSE(round(2 * predictions_test$`+ reg. user effect`,0) / 2,
+     predictions_test$rating)
+
+data.frame(real = predictions_train$rating,
+           pred = predictions_train$`+ reg. user effect`) %>% 
+  mutate(pred = round(pred,2)) %>% 
+  group_by(pred) %>% 
+  summarize(mode = mode(real))
+
+custom_round <- function(x){
+  case_when(
+    x < 0.88 ~ 0.5,
+    x < 2.07 ~ 1, 
+    x < 2.39 ~ 2,
+    x < 3.42 ~ 3, 
+    x < 4.24 ~ 4,
+    x >= 4.24 ~ 5
+  )
+}
+
+custom_round(2.1)
+
+RMSE(custom_round(predictions_test$`+ reg. user effect`),
+     predictions_test$rating)
+
+custom_round_2 <- function(x){
+  case_when(
+    x < 0.88 ~ 0.5,
+    x < 4.24 ~ x,
+    x >= 4.24 ~ 5
+  )
+}
+
+RMSE(custom_round_2(predictions_test$`+ reg. user effect`),
+     predictions_test$rating)
+
+custom_round_3 <- function(x){
+  case_when(
+    x < 0.88 ~ 0.5,
+    x < 5 ~ x,
+    x >= 5 ~ 5
+  )
+}
+
+RMSE(custom_round_3(predictions_test$`+ reg. user effect`),
+     predictions_test$rating)
+
+
+custom_round_4 <- function(x){
+  case_when(
+    x < .5 ~ 0.5,
+    x < 5 ~ x,
+    x >= 5 ~ 5
+  )
+}
+
+RMSE(custom_round_4(predictions_test$`+ reg. user effect`),
+     predictions_test$rating)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+# Results
+
+section that presents the modeling results and discusses the model performance
+
+# Conclusion
+
+section that gives a brief summary of the report, its limitations and future work
+
+
+Discussion on the definition of the validation set - not appropriate, should have separated based on the time. validation should be on the ratings given during the last year of the dataset. The way it is currently set up, we are using current data to predict evaluations given in the past. Tastes evolve. Certain movies age better than others. Certain movies will only be watched (and therefore rated) based on a recommendation given by the recommender system.
+
+
+Previous ratings are not a very good predictors of future ratings, apart from movie average and user average. They are useful for identifying trends (related users and related movies), but not at predicting future ratings. Signal/noise ratio is too high (dá pra defender matematicamente???).
+
+A good algo would be using the ratings to define groups, and then recommend the best rated movies from a group from which the user has watched movies frequently.
+
+
+Discussão sobre o fato que RMSE é pouco relevante, já que o output do algoritmo não é prever um rating, mas é na verdade fazer uma recomendação. Assim, pequenos ajustes nas notas mudam drasticamente a ordem dos filmes que são recomendados. Como exemplo, pegar alguns usuários aleatórios e calcular, para cada modelo usado ao longo do estudo, qual teria sido o filme com o maior rating esperado para aquele usuário. (pensar em como fazer quando vários dos filmes estiverem com rating esperado 5 estrelas, talvez calcular sem saturation).
+
+Considerando este aspecto, uma modificação que melhora o RMSE foi aplicar uma saturação - impedir que o rating previsto seja abaixo de 0.5 ou acima de 5 estrelas. Entretando, para fins práticos, seria melhor sacrificar o RMSE para ter um algoritmo que não gere um monte de 'empates' em 5 estrelas.
+
+
+
+# Random thoughts
+
+- Not rating is different than not having an opinion - 1) not rated because person does not know about the movie, 2) not rated because person did not take to time to rate, 3) not rated because person is not interested in this genre
+- How often does this person rate movies?
+- Watching and not watching are indirect votes
+- Use clusters to identify genres, then see how users respond to each genre
+- Include in discussion - services like netflix have access to indirect votes - what movies did people watch? Much more complete form of vote
+
+# Instructions
+
+Your report in PDF format
+Your report in Rmd format
+A script in R format that generates your predicted movie ratings and RMSE score
+
+
+The report documents the analysis and presents the findings, along with supporting statistics and figures. The report must be written in English and uploaded. The report must include the RMSE generated. The report must include at least the following sections:
+
+- 10 points: All 3 files were submitted in the requested formats.
+- 40 points: The report includes all required sections, is easy to follow with good supporting detail throughout, and is insightful and innovative. 
+- 25 points: Code is easy to follow, is consistent with the report, and is well-commented.
+25 points: RMSE < 0.86490
+
+RMSE (25 points)
+Provide the appropriate score given the reported RMSE. Please be sure not to use the validation set (the final hold-out test set) for training or regularization - you should create an additional partition of training and test sets from the provided edx dataset to experiment with multiple parameters or use cross-validation.
+
+
+The report must include at least the following sections:
+1. an introduction/overview/executive summary section that describes the dataset and summarizes the goal of the project and key steps that were performed
+2. a methods/analysis section that explains the process and techniques used, including data cleaning, data exploration and visualization, insights gained, and your modeling approach
+3. a results section that presents the modeling results and discusses the model performance
+4. a conclusion section that gives a brief summary of the report, its limitations and future work
+
+
+
+
+
+# Reminders
+- remove eval=FALSE from all chunks (in particular the one that downloads and reads the data)
+- verificar se todas as colunas que quero mostrar estão sendo impressas no relatório
+- verificar se as imagens estão aparecendo no github - acho que precisa salvá-las como arquivo imagem e chamar o endereço, ao invés de plotar no rmd
+- a cada novo predictor, avaliar o quanto ele explica do resíduo dos anteriores (ao invés da média), pra não contabilizar duas vezes a mesma coisa
+- pensar se o lugar certo de fazer as análise é no EDA ou após incluir cada bias, analisando somente o resíduo. talvez manter uma EDA detalhada, e na hora de criar o modelo ser um pouco mais direto (já mostramos que pontos A e B são importantes, agora vamos incluir no modelo)
+- usar kable (knitr table!) e padronizar todas as tabelas
+- verificar como acrescentar um table of contents (acho que knitr gera automaticamente)
+- assistir de novo as aulas sobre movielens
+- não deixar de ler o que foi feito no desafio do netflix
+- pacote recommenderlab - recomendado no vídeo
+- limpar variáveis desnecessárias
+- se os resultados não ficarem bons no validation, dividir edx em train e test ou fazer bootstrapping ou cross-validation e tentar procurar parâmetros mais robustos, com menos risco de overtraining
+- deixar o objeto results com nomes e descrições compatíveis
+- muito cuidado ao usar o timestamp como predictor - estou usando o futuro pra prever o passado? em outras palavras, estou usando preferências de um usuário medidas com base em todo o seu histórico para prever um rating que ele já deu?
+- considerar remover as colunas de genres para a maior parte do trabalho, só está poluindo, vou usar somente para um pedacinho
+- residue ou residual???
+- criar um objeto para cada variável que tem um valor único associado com ela - objeto users com uma coluna correspondente a cada variável com relação 1/1 com usuário, objeto movies com uma coluna correspondente a cada variável com relação 1/1 com filme etc. Assim fica muito mais fácil de usar join para adicionar as variáveis necessárias para cada conta.
+- pensar em remover train/test, ao invés disso fazer tudo por bootstrapping ou x-validation (que seria o equivalente a dividir em train/test, só que várias vezes, o que é mais robusto)
+- remover comandos replace_na das manipulações de genres - passei a tratar (no genres listed) como um gênero
+- colocar em algum lugar lembrete de que precisei usar memory.limit(size = 15000), vários pe
+- usar regularization em todos os pedaços do modelo e não ficar explicando muita coisa...
+- criar um data.frame lambda com os lambdas selecionados para cada regularização
+- ou então criar um data.frame coefficients (ou algo do tipo), com todos os parâmetros obtidos através de otimização (incluir também  mu etc)
+- residue ou residual?
+- melhorar os cálculos dos lambdas, dá pra reconstruir somente com os valores e com o n()
