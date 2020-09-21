@@ -1,0 +1,13 @@
+name: MovieRecommenderApp
+title: MovieRecommenderApp
+username:
+account: fabio-a-oliveira
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 2794090
+bundleId: 3622674
+url: https://fabio-a-oliveira.shinyapps.io/MovieRecommenderApp/
+when: 1599939506.11749
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: PrepareDataset.R
