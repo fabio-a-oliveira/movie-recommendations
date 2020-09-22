@@ -1210,4 +1210,4 @@ rm(random.users.set,random.users.predictions)
 
 # Save variables for use in the report ---------------------------------------------------------------------------------
 
-save.image("~/HX9_MovieLens.RData")
+save.image(paste(getwd(),"/HX9_MovieLens.RData", sep=""))

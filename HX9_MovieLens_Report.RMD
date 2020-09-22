@@ -33,9 +33,9 @@ library(caret)
 
 ```{r load workspace, include = FALSE, results = 'hide'}
 
-# script HX9_MovieLens_Main.R needs to be sourced before kniting this report!
+# script HX9_MovieLens_Main.R needs to be sourced to save file "HX9_MovieLens.RData" to work directory before kniting this report!
 
-load("~/HX9_MovieLens.RData")
+load(paste(getwd(),"/HX9_MovieLens.RData", sep=""))
 
 ```
 
@@ -111,6 +111,7 @@ data.frame(Object = c("train", "test", "validation"),
 rm(full)
 
 ```
+
 It is relevant to notice that the _train_ set contains entries for all the individual users and movies, so the different models are not required to predict ratings for users and movies with which they have had not previous training.
 
 A glimpse at a sample of these objects reveals what information is available and what further adjustments are necessary:
@@ -124,6 +125,7 @@ bind_rows(edx,validation) %>%
   sample_n(15)
 
 ```
+
 After a quick glimpse at the dataset, we see that the `timestamp` column is formatted in a manner that is difficult to read. The `title` column contains both the movie title and its year of release. Additionally, the `genres` column contains all the genres associated with the movie, separated by a "|" character. Some basic data wrangling is necessary to have this information in usable formats. However, in order to preserve these objects as close as possible to the original data, any manipulation and formatting of the data is done in the objects created in the next step.
 
 The choice for doing training and testing with a single split of the _edx_ data (as opposed to performing k-fold cross-validation) has been motivated by simplicity and saving time in code execution. With this approach, statistics can be drawn directly from the _train_ set and performance for different parameters can be tested directly on the _test_ set, without the need to average results over multiple folds. The fact that there are millions of observations in both sets guarantees that the outcomes are robust to random variability and mitigate the risk of overtraining.  
@@ -138,14 +140,16 @@ users %>% select(userId, `average rating`, `number of ratings`) %>% sample_n(6) 
 ```
 
 * The `movies` object contains a summary with the average rating and number of ratings for each individual movie in the form of a data frame; 
+
 ```{r sample of movies object}
 options(width = 110)
 movies %>% select(movieId, title, year, genres, `average rating`, `number of ratings`) %>% 
-  filter(str_length(title) < 30 & str_length(genres) < 20) %>% 
+  filter(str_length(title) < 20 & str_length(genres) < 20) %>% 
   sample_n(6) %>% as.data.frame()
 ```
 
 * The `genres` object contains both a data frame with each individual movie genre associated with each movie (in "long" format) and a data frame with columns for each movie genre indicating whether each movie is associated with each particular movie (in "wide" format), in the form of a list;
+
 ```{r sample of the genres object}
 options(width = 90)
 genres$long %>% as.data.frame() %>% head(10)
@@ -246,6 +250,7 @@ movies %>%
   kable(digits = 2, caption = "Top 10 Popular Movies")
 
 ```
+
 It is also interesting to see which movies have the highest average ratings.
 
 ```{r best rated movies}
@@ -260,6 +265,7 @@ movies %>%
   kable(digits = 2, caption = "Top 10 Best Rated Movies")
 
 ```
+
 From this previous table, we notice that the movies at the top of the list all have very low number of ratings. That indicates that they high averages are most likely a product of random variability. When we create a list of the top 10 movies arranged by their ratings, but first filter out movies with less then 100 individual ratings, we get a more reasonable result:
 
 
@@ -276,6 +282,7 @@ movies %>%
   kable(digits = 2, caption = "Top 10 Best Rated Movies (with over 100 ratings)")
 
 ```
+
 A histogram of the average movie ratings shows that movie averages are most common in the vicinity of 3.5. However, the overall average is actually around 3.19, which indicates that the data is skewed to the right. This makes sense, since the upper limit of the interval of possible ratings is closer to the average, so movies better rated than the average are more concentrated.
 
 ```{r histogram of ratings per movies}
@@ -1029,7 +1036,7 @@ $$e_{IBCF}^{u,m} = \frac {M_{u,m_R} * C_{m_R,m}} {\sum_{m_R}^{}C_{m_R,m}}$$
 where:
 $e_{IBCF}^{u,m}$ = adjustment to prediction of rating of user $u$ to movie $m$ according to ratings given by user $u$ to similar movies  
 $M_{u,m_R}$ = ratings given by user $u$ to set of most popular movies   
-$C_{m_R,m}$ = correlation matrix between each movie in the complete dataset and each of the most popular movies, calculated from the set of common users between each pair of movies
+$C_{m_R,m}$ = correlation matrix between each movie in the complete dataset and each of the most popular movies, calculated from the set of common users between each pair of movies    
 $\sum_{m_R}^{}C_{m_R,m}$ = row sums of $C_{m_R,m}$   
 
 Because the value of $e_{IBCF}^{u,m}$ is unique for each user/movie combination, it is impracticable to represent the full set of values in usual matrix form. The package `Matrix` is used to represent these values in sparse matrix form.
@@ -1062,7 +1069,6 @@ results$test %>%
 ```
 
 
-
 # Results
 
 The final model has been constructed by considering the rating averages for each particular movie and user. It also considers each user's individual preference for the different movie genres and the effect that the number of years since movie release has on the ratings. Finally, ratings are adjusted according to how each user has rated similar movies (from a list of the 1000 most popular movies). The mathematical representation of the full model is repeated here for convenience:
@@ -1083,13 +1089,14 @@ The results obtained as we applied each step in the modeling phase to the _test_
 
 ```{r full results in all 3 sets}
 
+options(width = 90)
+
 data.frame(modelId = results$train$modelId,
            results_train = results$train$RMSE,
            results_test = results$test$RMSE,
            results_validation = results$validation$RMSE,
            description = results$train$description) %>% 
   kable(col.names = c("modelId", "RMSE (train set)", "RMSE (test set)", "RMSE (validation set)", "Description"), align = 'c')
-
 
 ```
 
@@ -1102,6 +1109,8 @@ However, this subtle improvements to the RMSE should not be interpreted as insig
 The table contains the top 20 recommendations given to a randomly selected user by 3 of the models and illustrates this feature:
 
 ```{r recommendations for random user}
+
+options(width = 90)
 
 random.user <-
   users %>%
