@@ -7,7 +7,7 @@ toc: TRUE
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, cache = TRUE, include = TRUE, fig.align = 'center')
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE, include = TRUE, fig.align = 'center', out.width = "70%", out.height = "70%")
 options(width = 60)
 ```
 
@@ -85,7 +85,7 @@ The R code for this project is divided into two different files. All of the data
 
 A series of adjustments to the original _MovieLens 10M_ dataset is necessary before we begin analysis and modeling. These adjustments are described below:  
   
-#### 1. The original data is partitioned into the _train_, _test_, and _validation_ datasets.
+#### 1. The original data is partitioned into the _train_, _test_, and _validation_ datasets.   
 
 As a first step, the original data is partitioned into the _edx_ and _validation_ data frames at a 0.9/0.1 proportion. The _edx_ object is then partitioned into the _train_ and _test_ sets at a 0.8/0.2 proportion.
 
@@ -130,7 +130,7 @@ After a quick glimpse at the dataset, we see that the `timestamp` column is form
 
 The choice for doing training and testing with a single split of the _edx_ data (as opposed to performing k-fold cross-validation) has been motivated by simplicity and saving time in code execution. With this approach, statistics can be drawn directly from the _train_ set and performance for different parameters can be tested directly on the _test_ set, without the need to average results over multiple folds. The fact that there are millions of observations in both sets guarantees that the outcomes are robust to random variability and mitigate the risk of overtraining.  
   
-#### 2. Objects are created to hold data pertinent to individual entries on the datasets
+#### 2. Objects are created to hold data pertinent to individual entries on the datasets   
 
 Several R objects are created to hold relevant information that will be used for analysis, modeling and holding results during the project. Basic summary statistics and some necessary data wrangling identified in the analysis of the _train_, _test_, and _validation_ sets are also performed and saved to the new objects.
 
@@ -163,7 +163,7 @@ genres$wide %>% as.data.frame() %>% head(10)
 
 During the creation of the models, additional information pertinent to each entry of these data frames is included.  
   
-#### 3. Creation of functions
+#### 3. Creation of functions   
 
 In order to facilitate calculations during the subsequent phases, some R functions are created to perform tasks that are repeated multiple times:
 
@@ -671,9 +671,9 @@ The model is depicted in mathematical notation below:
 
 $$Y_{u,m} = \mu + \epsilon$$
 where:  
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating  
-$\epsilon$ = random residual  
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating    
+$\epsilon$ = random residual    
 
 The RMSE result obtained after application of this model to the _test_ set is below:
 
@@ -692,10 +692,10 @@ The model with this new parameter is this:
 
 $$Y_{u,m} = \mu + e_{movie} + \epsilon$$   
 where:   
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating  
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating   
 $e_{movie}$ = movie effect for movie $m$  
-$\epsilon$ = random residue   
+$\epsilon$ = random residual   
 
 As $e_m$ is modeled as the average points each movie receives above the _train_ set average, $\mu+e_m$ is equal to each individual movie average. This version of the model corresponds to predicting that each movie is rated as the average of previous ratings plus a random term.
 
@@ -719,14 +719,14 @@ The model with the movie effect regularized according to the number of ratings i
 $$Y_{u,m} = \mu + e_{movie}^r + \epsilon$$   
 where:   
 $Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect 
-$\epsilon$ = random residue
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect    
+$\epsilon$ = random residual   
 
 The regularized movie effect corresponding to each individual movie is obtained via a modified version of the average deviation from the global average, according to the equation below:
 
 $$e_m^r(\lambda) = \frac{1}{\lambda+n_i}* \sum_{m=1}^{n_i} (Y_{m,i} - \mu)$$
-This indicates that the movie effect $e_m^r$ depends on an arbitrary parameter $\lambda$, which can be chosen to minimize the residue.
+This indicates that the movie effect $e_m^r$ depends on an arbitrary parameter $\lambda$, which can be chosen to minimize the residual.
 
 The figure below depicts the results obtained on the _test_ set after calculating the regularized movie effect on the _train_ set with different values of lambda, from which we choose the optimal.
 
@@ -792,11 +792,11 @@ The modified model is depicted below:
 $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}+ \epsilon)$$   
 
 where:   
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect  
-$e_{user}$ = simple user effect
-$\epsilon$ = random residue
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect   
+$e_{user}$ = simple user effect   
+$\epsilon$ = random residual   
 
 After application of this model, we obtain the results below:
 
@@ -820,22 +820,19 @@ $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}^r+ \epsilon)$$
 
 where:   
 $Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect  
-$e_{user}^r$ = regularized user effect
-$\epsilon$ = random residue
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect   
+$e_{user}^r$ = regularized user effect   
+$\epsilon$ = random residual   
 
-The application of this model in the _test_ set gives the following results:
+The application of this model in the _test_ set gives the results below. We see that regularization does not introduce a great gain in performance, which is explained by the fact the fact that we are using a massive dataset and that ratings from users that are not very active do not account for a significant portion of the total ratings.
 
 ```{r results for regularized user effect model}
-
 results$test %>% 
   filter(modelId == 5) %>% 
   kable(caption = "Results from application of Regularized User Effect model (modelId = 5) to test set", align = 'c')
-
 ```
 
-Again, we see that regularization does not introduce a great gain in performance, which is explained by the fact the fact that we are using a massive dataset and that ratings from users that are not very active do not account for a significant portion of the total ratings.
 
 ### Effect of movie genres (Drama movies)
 
@@ -850,12 +847,12 @@ The corresponding model is represented as:
 $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}^r+ e_{drama / non-drama}^{r} + \epsilon)$$   
 
 where:   
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect  
-$e_{user}^r$ = regularized user effect
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect   
+$e_{user}^r$ = regularized user effect   
 $e_{drama / non-drama}^{r}$ = regularized drama/non-drama effect   
-$\epsilon$ = random residue
+$\epsilon$ = random residual   
 
 To illustrate how this term is distributed across users, we look at a scatter plot of the drama and non-drama effects for a sample of 500 random users:
 
@@ -948,13 +945,13 @@ In order to include this information in the model, we begin by grouping all the 
 $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}^r+ \sum_{n = 1}^{N_{PC}}e_{genre(PC)}^r + \epsilon)$$   
 
 where:   
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect  
-$e_{user}^r$ = regularized user effect
-$N_{PC}$ = number of principal components
-$e_{genre(PC)}^{r}$ = regularized genre effect   
-$\epsilon$ = random residue
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect   
+$e_{user}^r$ = regularized user effect   
+$N_{PC}$ = number of principal components   
+$e_{genre(PC)}^{r}$ = regularized genre effect     
+$\epsilon$ = random residual   
 
 Here, we use all of the 20 principal components of the movie genres tagging system, so $N_{PC}=20$. The value of $\lambda$ that minimizes the residuals after application of this model in the _test_ set is 35, and the RMSE in the _test_ set is displayed below:
 
@@ -1001,14 +998,14 @@ The model that incorporates this feature of the data is represented below, follo
 $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}^r+ \sum_{n = 1}^{N_{PC}}e_{genre(PC)}^r + e_{age}^{r} + \epsilon)$$   
 
 where:   
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect  
-$e_{user}^r$ = regularized user effect
-$N_{PC}$ = number of principal components
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect   
+$e_{user}^r$ = regularized user effect   
+$N_{PC}$ = number of principal components   
 $e_{genre(PC)}^{r}$ = regularized genre effect   
-$e_{age}^{r}$ = regularized movie age effect
-$\epsilon$ = random residue
+$e_{age}^{r}$ = regularized movie age effect   
+$\epsilon$ = random residual   
 
 ```{r results from movie age model in test set}
 results$test %>% 
@@ -1033,8 +1030,8 @@ As a measure of similarity between movies, we choose to calculate the correlatio
 The corrections according to the user's rating to a particular movie is given by the equation below:
 
 $$e_{IBCF}^{u,m} = \frac {M_{u,m_R} * C_{m_R,m}} {\sum_{m_R}^{}C_{m_R,m}}$$
-where:
-$e_{IBCF}^{u,m}$ = adjustment to prediction of rating of user $u$ to movie $m$ according to ratings given by user $u$ to similar movies  
+where:   
+$e_{IBCF}^{u,m}$ = adjustment to prediction of rating of user $u$ to movie $m$ according to ratings given by user $u$ to similar movies     
 $M_{u,m_R}$ = ratings given by user $u$ to set of most popular movies   
 $C_{m_R,m}$ = correlation matrix between each movie in the complete dataset and each of the most popular movies, calculated from the set of common users between each pair of movies    
 $\sum_{m_R}^{}C_{m_R,m}$ = row sums of $C_{m_R,m}$   
@@ -1049,16 +1046,16 @@ $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}^r+ \sum_{n = 1}^{N_{
 
 where:   
 $Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
+$\mu$ = mean global rating   
 $e_{movie}^r$ = regularized movie effect  
-$e_{user}^r$ = regularized user effect
-$N_{PC}$ = number of principal components
+$e_{user}^r$ = regularized user effect   
+$N_{PC}$ = number of principal components   
 $e_{genre(PC)}^{r}$ = regularized genre effect   
-$e_{age}^{r}$ = regularized movie age effect
-$e_{IBCF}^{u,m}$ = adjustment to prediction of rating of user $u$ to movie $m$ according to IBCF
-$\epsilon$ = random residue
+$e_{age}^{r}$ = regularized movie age effect   
+$e_{IBCF}^{u,m}$ = adjustment to prediction of rating of user $u$ to movie $m$ according to IBCF   
+$\epsilon$ = random residual   
 
-The results after application of this model on the _test_ set are depicted below:
+The results after application of this model on the _test_ set are depicted below:   
 
 ```{r results for IBCF model}
 
@@ -1076,14 +1073,14 @@ The final model has been constructed by considering the rating averages for each
 $$Y_{u,m} = limitRange_{0.5}^5(\mu + e_{movie}^r + e_{user}^r+ \sum_{n = 1}^{N_{PC}}e_{genre(PC)}^r + e_{age}^{r} + \epsilon)$$   
 
 where:   
-$Y_{u,m}$ = rating given by user $u$ to movie $m$  
-$\mu$ = mean global rating
-$e_{movie}^r$ = regularized movie effect  
-$e_{user}^r$ = regularized user effect
-$N_{PC}$ = number of principal components
-$e_{genre(PC)}^{r}$ = regularized genre effect   
-$e_{age}^{r}$ = regularized movie age effect
-$\epsilon$ = random residue   
+$Y_{u,m}$ = rating given by user $u$ to movie $m$   
+$\mu$ = mean global rating   
+$e_{movie}^r$ = regularized movie effect   
+$e_{user}^r$ = regularized user effect   
+$N_{PC}$ = number of principal components   
+$e_{genre(PC)}^{r}$ = regularized genre effect    
+$e_{age}^{r}$ = regularized movie age effect   
+$\epsilon$ = random residual   
 
 The results obtained as we applied each step in the modeling phase to the _test_ set were presented in their respective sections. Here, we aggregate the results from all versions of model after application to the _train_, _test_, and _validation_ sets:
 
