@@ -123,8 +123,8 @@ data.frame(Object = c("train", "test", "validation"),
          proportion_movies = round(movies / n_distinct(full$movieId),2) * 100) %>% 
   transmute(Object,
             "Number of Ratings (% of total)" = paste0(ratings," (",proportion_ratings,"%)"),
-            "Number of Users (% of total)" = paste0(ratings," (",proportion_users,"%)"),
-            "Number of Movies (% of total)" = paste0(ratings," (",proportion_movies,"%)")) %>% 
+            "Number of Users (% of total)" = paste0(users," (",proportion_users,"%)"),
+            "Number of Movies (% of total)" = paste0(movies," (",proportion_movies,"%)")) %>% 
   kable(caption = "Entries in the different sets")
 
 rm(full)
@@ -777,20 +777,28 @@ df %>%
   geom_point(data = filter(df, R == min(df$R)), color = 'black', fill = 'red', shape = 21, size = 5) +
   geom_point() +
   labs(title = "RMSE for regularized movie effect with different values of lambda", x = "Lambda", y = "Root Mean Squared Error") +
-  annotate(geom = "label", label = paste("lambda = ", df$lambda[which.min(df$R)], "\n RMSE = ", round(min(df$R),5)), x = 3.2, y = .94402) +
-  annotate(geom = "curve", curvature = .1, color = 'red', arrow = arrow(length = unit(2, 'mm')), xend = 2.5, yend = .943995, x = 3.1, y = .944014)
+  annotate(geom = "label", 
+           label = paste("lambda = ", df$lambda[which.min(df$R)], "\n RMSE = ", round(min(df$R),5)), 
+           x = df$lambda[which.min(df$R)] + 0.7, y = min(df$R) + 0.00005) +
+  annotate(geom = "curve", curvature = .1, color = 'red', arrow = arrow(length = unit(2, 'mm')), 
+           xend = df$lambda[which.min(df$R)], yend = min(df$R)+0.00001, 
+           x = df$lambda[which.min(df$R)] + 0.6, y = min(df$R) + 0.00004)
   
+lambda.opt <- df$lambda[which.min(df$R)]
+
 rm(lambda, residuals, R, df)
 
 ```
 
-The optimal regularization effect parameter $\lambda$ was found to be 2.5.
+The optimal regularization effect parameter $\lambda$ was found to be `r round(lambda.opt,1)`.
 
-From he RMSE results in the table above, it is evident that regularization has not contributed with a substantial improvement. This may be due to the fact that, as the dataset gets larger, instances of movies with very few ratings become rarer and have a lesser effect on the overall results.
+From the RMSE results in the table above, it is evident that regularization has not contributed with a substantial improvement. This may be due to the fact that, as the dataset gets larger, instances of movies with very few ratings become rarer and have a lesser effect on the overall results.
 
 The RMSE after application of this model on the _test_ set is given below:
 
 ```{r results for regularized movie effect model}
+
+rm(lambda.opt)
 
 results$test %>% 
   filter(modelId == 3) %>% 
@@ -888,7 +896,7 @@ users %>%
 
 The plot shows a clear negative correlation between the drama and non-drama effects for each user. This is to be expected, since by definition their average (weighted by the number of drama and non-drama movies) is equal to each user's mean residual.
 
-In order to get a sense of how pronounced the preference is, look at a plot of the spread between the drama and non-drama effects.
+In order to get a sense of how pronounced the preference is, we look at a plot of the spread between the drama and non-drama effects.
 
 ```{r spread between drama and non-drama effects}
 
