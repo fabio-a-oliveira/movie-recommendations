@@ -21,6 +21,7 @@ if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-
 if(!require(knitr)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
 if(!require(Matrix)) install.packages("Matrix", repos = "http://cran.us.r-project.org")
 if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if (!("fs" %in% installed.packages())) install.packages("fs")
 
 library(tidyverse)
 library(data.table)
@@ -29,13 +30,31 @@ library(knitr)
 library(Matrix)
 library(caret)
 
+# Expand available memory
+
+memory.limit(size = 20000)
+gc()
+
 ```
 
 ```{r load workspace, include = FALSE, results = 'hide'}
 
-# script HX9_MovieLens_Main.R needs to be sourced to save file "HX9_MovieLens.RData" to work directory before kniting this report!
+# this chunk loads the results from the HX9_MovieLens_Main.R script. You need to either clone the repo to your machine in order to have these files available in the \results folder or run the script yourself.
 
-load(paste(getwd(),"/HX9_MovieLens.RData", sep=""))
+load(file.path("results","small_objects.RData"))
+
+edx <- fs::dir_ls("results") %>% str_subset("(?<!_)edx_\\d{3}") %>% map_dfr(read_csv,col_types=cols())
+ratings <- fs::dir_ls("results") %>% str_subset("(?<!_)ratings_\\d{3}") %>% map_dfr(read_csv,col_types=cols())
+test <- fs::dir_ls("results") %>% str_subset("(?<!_)test_\\d{3}") %>% map_dfr(read_csv,col_types=cols())
+train <- fs::dir_ls("results") %>% str_subset("(?<!_)train_\\d{3}") %>% map_dfr(read_csv,col_types=cols())
+users <- fs::dir_ls("results") %>% str_subset("(?<!_)users_\\d{3}") %>% map_dfr(read_csv,col_types=cols())
+validation <- fs::dir_ls("results") %>% str_subset("(?<!_)validation_\\d{3}") %>% map_dfr(read_csv,col_types=cols())
+
+predictions <- 
+  list(train = fs::dir_ls("results") %>% str_subset("(?<!_)predictions_train_\\d{3}") %>% map_dfr(read_csv,col_types=cols()),
+       test = fs::dir_ls("results") %>% str_subset("(?<!_)predictions_test_\\d{3}") %>% map_dfr(read_csv,col_types=cols()),
+       validation = fs::dir_ls("results") %>% str_subset("(?<!_)predictions_validation_\\d{3}") %>% map_dfr(read_csv,col_types=cols()),
+       `sample users` = fs::dir_ls("results") %>% str_subset("(?<!_)predictions_sample_users_\\d{3}") %>% map_dfr(read_csv,col_types=cols()))
 
 ```
 
@@ -75,9 +94,9 @@ The project has been developed according to a sequence of steps:
 
 Each of these steps is explained in more details in the corresponding section of this report.
 
-Additionaly, due to the size of the original dataset used in this analysis, significant challenges related to computing performance were tackled. Constant care was taken to avoid using unnecessary memory. Nevertheless, certain sections of the code required a command to increase the amount of memory available to R with the `memory.limit(size = 15000)` command. During the creation of the model with the IBCF in particular, the calculations required the use of the `Matrix` package for dealing with sparse matrices and the implementation of custom functions to identify the similarity between different movies in a memory-efficient manner.
+Additionally, due to the size of the original dataset used in this analysis, significant challenges related to computing performance were tackled. Constant care was taken to avoid using unnecessary memory. Nevertheless, certain sections of the code required a command to increase the amount of memory available to R with the `memory.limit(size = 16000)` command. During the creation of the model with the IBCF in particular, the calculations required the use of the `Matrix` package for dealing with sparse matrices and the implementation of custom functions to identify the similarity between different movies in a memory-efficient manner.
 
-The R code for this project is divided into two different files. All of the data preparation and the modelling are done in the `HX9_MovieLens_Main.R` script. This script prepares the data and does all of the calculations necessary for the development of the models, creates functions to make predictions according to each model, and calculates the performance for each model. It then saves the resulting objects into files that are loaded by the `HX9_MovieLens_Report.RMD` script (the R Markdown script that generates this report) to create all the tables and graphics in this report.
+The R code for this project is divided into two different files. All of the data preparation and the modeling are done in the `HX9_MovieLens_Main.R` script. This script prepares the data and does all of the calculations necessary for the development of the models, creates functions to make predictions according to each model, and calculates the performance for each model. It then saves the resulting objects into files that are loaded by the `HX9_MovieLens_Report.RMD` script (the R Markdown script that generates this report) to create all the tables and graphics in this report.
 
 ***
 

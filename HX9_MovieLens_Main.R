@@ -16,6 +16,10 @@
 # Install and load libraries; Run code provided on course to load dataset and to create the training ("edx") dataset 
 # and validation ("validation") dataset
 
+## Allow R to access additional memory
+
+memory.limit(size = 16000)
+
 # Install and load libraries
 
 if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
@@ -209,7 +213,7 @@ genres.long <-
   select(- `genre #`)
 
 genres.wide <-
-  long %>% 
+  genres.long %>% 
   mutate("true" = TRUE) %>% 
   pivot_wider(names_from = "genre",
               values_from = "true",
@@ -248,7 +252,7 @@ results <- list(train = data.frame(),
 
 # remove temporary variables
 
-rm(genres.long,genres.wide)
+rm(genres.long,genres.wide,genres.column.order)
 
 # Benchmark - global average -------------------------------------------------------------------------------------------
 
@@ -1210,4 +1214,43 @@ rm(random.users.set,random.users.predictions)
 
 # Save variables for use in the report ---------------------------------------------------------------------------------
 
-save.image(paste(getwd(),"/HX9_MovieLens.RData", sep=""))
+# save.image(paste(getwd(),"/HX9_MovieLens.RData", sep=""))
+
+save(list = c("genres", "models", "movies", "parameters", "results",
+              "limitRange", "RMSE", "sparse.colCenter", "sparse.colMeans",
+              "sparse.colSums","sparse.correlationCommonRows"),
+     file = file.path("results","small_objects.RData"))
+
+df_to_save <- list(edx, predictions$train, predictions$test,
+                   predictions$validation, predictions$`sample users`,
+                   ratings, test, train, users, validation)
+names_to_save <- list("edx", "predictions_train", "predictions_test",
+                      "predictions_validation", "predictions_sample_users",
+                      "ratings","test","train","users","validation")
+
+sapply(1:length(names_to_save),
+       function(i){
+         
+         df = df_to_save[[i]]
+         name = names_to_save[[i]]
+         num_files = as.numeric(ceiling(object.size(df)/10^7))
+         
+         for (f in 1:num_files) {
+           
+           fileName = paste(name,
+                            "_",
+                            str_pad(f, side = "left", width = 3, pad = "0"),
+                            ".csv", sep = "")
+           
+           df %>% 
+             mutate(fileNum = sort(rep(x = 1:num_files, 
+                                       length.out = nrow(df)))) %>% 
+             filter(fileNum == f) %>% 
+             select(-fileNum) %>% 
+             write_csv(path = file.path("results",fileName),
+                       append = FALSE)
+         }
+         
+       })
+
+rm(df_to_save, names_to_save)
